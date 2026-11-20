@@ -5,7 +5,9 @@
   "description": "Painel de análise macro, técnica e de opções com motor de estratégias e camada anti-erro.",
   "main": "server.js",
   "type": "commonjs",
-  "engines": { "node": ">=18.18" },
+  "engines": {
+    "node": ">=18.18"
+  },
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
@@ -15,7 +17,7 @@
   "dependencies": {
     "compression": "^1.7.5",
     "express": "^4.21.2",
-    "fast-xml-parser": "^4.5.1",
+    "fast-xml-parser": "^5.12.1",
     "helmet": "^8.0.0",
     "lightweight-charts": "^4.2.2"
   }

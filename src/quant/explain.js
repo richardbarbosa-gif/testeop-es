@@ -67,9 +67,11 @@ function execution(best, ctx) {
   if (ctx.lead && Math.abs(ctx.lead.adrPost || 0) >= 1.5) steps.push('Gap provável na abertura: espere 15–30 min após a abertura para o spread das opções normalizar.');
   // Saídas por família
   const fam = best.family;
-  const sup = ctx.ta.supports[0], res = ctx.ta.resistances[0];
+  const sup = ctx.ta.supports[0] || { price: ctx.ta.lo52, synthetic: 'mínima de 52 semanas' };
+  const res = ctx.ta.resistances[0] || { price: ctx.ta.hi52, synthetic: 'máxima de 52 semanas' };
+  const lvl = (x, nome) => `${x.synthetic || nome} ${f2(x.price)}`;
   if (fam === 'direcional-debito') {
-    steps.push(`Alvo: realizar 50–100% de lucro sobre o prêmio, ou parcial perto da ${best.legs[0].type === 'call' ? `resistência ${res ? f2(res.price) : '—'}` : `suporte ${sup ? f2(sup.price) : '—'}`}.`);
+    steps.push(`Alvo: realizar 50–100% de lucro sobre o prêmio, ou parcial perto de ${best.legs[0].type === 'call' ? lvl(res, 'resistência') : lvl(sup, 'suporte')}.`);
     steps.push('Stop: sair se o prêmio cair 40–50% ou se o ativo fechar do lado errado da MME20.');
     steps.push('Stop de tempo: zerar faltando 21 dias para o vencimento se o movimento não veio (o theta acelera).');
   } else if (fam === 'trava-debito') {
@@ -85,7 +87,7 @@ function execution(best, ctx) {
   } else if (fam === 'neutra-debito') {
     steps.push('Alvo: realizar com 25–40% de lucro após o movimento; stop de tempo antes de 21 dias para o vencimento.');
   }
-  if (sup || res) steps.push(`Níveis para monitorar: suporte ${sup ? f2(sup.price) : '—'} · resistência ${res ? f2(res.price) : '—'} · MME20 ${f2(ctx.ta.ma.e20)}.`);
+  steps.push(`Níveis para monitorar: ${lvl(sup, 'suporte')} · ${lvl(res, 'resistência')} · MME20 ${f2(ctx.ta.ma.e20)}.`);
   steps.push(`Registre no Diário (botão abaixo) para acompanhar o resultado e medir a taxa de acerto real do sistema.`);
   void cur;
   return steps;

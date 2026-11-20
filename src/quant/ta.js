@@ -205,7 +205,7 @@ function analyze(candles) {
   const lines = [];
   lines.push(`Tendência ${trend} (pontuação técnica ${score > 0 ? '+' : ''}${score.toFixed(0)}). ${st.label[0].toUpperCase() + st.label.slice(1)}.`);
   lines.push(`Médias: MME8 ${L(e8).toFixed(2)} · MME20 ${L(e20).toFixed(2)}${has200 ? ` · MMA200 ${L(s200).toFixed(2)}` : ''}. ${cross ? `Cruzamento de ${cross.type} da MME8 sobre a MME20 há ${cross.barsAgo} pregão(ões).` : ''}`);
-  if (ns || nr) lines.push(`Suporte mais próximo ${ns ? `${ns.price.toFixed(2)} (${pct(ns.price, price).toFixed(1)}%, ${ns.touches} toque(s))` : '—'}; resistência ${nr ? `${nr.price.toFixed(2)} (+${pct(nr.price, price).toFixed(1)}%, ${nr.touches} toque(s))` : '—'}.`);
+  if (ns || nr) lines.push(`Suporte mais próximo ${ns ? `${ns.price.toFixed(2)} (${pct(ns.price, price).toFixed(1)}%, ${ns.touches} toque(s))` : `nenhum pivô abaixo — preço em região de mínimas (referência: mínima de 52 semanas ${lo52.toFixed(2)})`}; resistência ${nr ? `${nr.price.toFixed(2)} (+${pct(nr.price, price).toFixed(1)}%, ${nr.touches} toque(s))` : '—'}.`);
   lines.push(`Faixa de 52 semanas: ${lo52.toFixed(2)} – ${hi52.toFixed(2)} (preço a ${pct(price, hi52).toFixed(1)}% da máxima). ATR14 ${atrNow.toFixed(2)} (${((atrNow / price) * 100).toFixed(1)}% do preço).`);
   if (rr != null) lines.push(`IFR14 ${rr.toFixed(0)}. Vol. histórica 20d ${(hvNow * 100).toFixed(1)}% (percentil ${hvPct != null ? hvPct.toFixed(0) : '—'} do último ano).`);
 

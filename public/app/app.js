@@ -201,6 +201,7 @@
   function loadAsset(t) {
     $('aTitle').textContent = t; $('aPrice').textContent = '…'; $('aChg').textContent = '';
     return api('/api/asset/' + encodeURIComponent(t)).then(function (a) {
+      if (a.ticker !== selected) return; // anti-erro: descarta resposta de ativo que não está mais selecionado
       $('aTitle').textContent = a.ticker + ' · ' + a.name;
       var cur = a.market === 'US' ? 'US$ ' : 'R$ ';
       $('aPrice').textContent = cur + n(a.quote.price);
@@ -247,7 +248,8 @@
     var b = $('gen'); b.disabled = true; b.textContent = 'Analisando…';
     $('opEmpty').hidden = false; $('opEmpty').innerHTML = '<div class="skel" style="height:18px;width:60%"></div><div class="skel" style="height:14px;width:85%;margin-top:10px"></div><div class="skel" style="height:14px;width:40%;margin-top:10px"></div>';
     var qs = '?capital=' + (isFinite(cap) ? cap : '') + '&risk=' + (isFinite(risk) ? risk : '');
-    api('/api/operation/' + encodeURIComponent(selected) + qs).then(function (o) { lastOp = o; renderOp(o); })
+    var asked = selected;
+    api('/api/operation/' + encodeURIComponent(asked) + qs).then(function (o) { if (o.ticker !== selected) return; lastOp = o; renderOp(o); })
       .catch(function (e) { $('opEmpty').textContent = 'Não foi possível gerar a análise: ' + e.message; })
       .finally(function () { b.disabled = false; b.textContent = 'Gerar operação'; });
   }
