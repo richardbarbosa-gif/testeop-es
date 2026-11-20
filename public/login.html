@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Radar de Opções · Acesso</title>
+<link rel="icon" href="/assets/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/base.css">
+<link rel="stylesheet" href="/assets/login.css">
+</head>
+<body>
+<main class="login-wrap">
+  <section class="login-card" aria-labelledby="t">
+    <div class="brand">
+      <img src="/assets/icon.svg" alt="" width="36" height="36">
+      <div>
+        <h1 id="t">Radar de Opções</h1>
+        <p class="muted">Macro · Gráfico · Volatilidade · Estratégias</p>
+      </div>
+    </div>
+    <form id="f" autocomplete="on" novalidate>
+      <div class="field">
+        <label for="user">Usuário</label>
+        <input class="input" id="user" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+      </div>
+      <div class="field">
+        <label for="pass">Senha</label>
+        <div class="pw">
+          <input class="input" id="pass" name="password" type="password" autocomplete="current-password" required>
+          <button type="button" class="pw-toggle" id="toggle" aria-label="Mostrar senha">Mostrar</button>
+        </div>
+      </div>
+      <div class="field" id="totpField" hidden>
+        <label for="totp">Código do autenticador (6 dígitos)</label>
+        <input class="input num" id="totp" name="totp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="\d{6}">
+      </div>
+      <p class="err" id="err" role="alert" aria-live="polite"></p>
+      <button class="btn btn-primary" id="go" type="submit">Entrar</button>
+    </form>
+    <p class="foot dim">Acesso restrito. Tentativas são limitadas e registradas.</p>
+  </section>
+</main>
+<script src="/assets/login.js"></script>
+</body>
+</html>

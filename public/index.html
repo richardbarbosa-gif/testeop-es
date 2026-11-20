@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Radar de Opções</title>
+<link rel="icon" href="/assets/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/base.css">
+<link rel="stylesheet" href="/app/app.css">
+</head>
+<body>
+<header class="top">
+  <div class="top-l">
+    <img src="/assets/icon.svg" alt="" width="28" height="28">
+    <strong class="logo">Radar<span>·</span>Opções</strong>
+    <nav class="tabs" role="tablist" aria-label="Seções">
+      <button role="tab" class="tab" data-tab="overview" aria-selected="true">Visão geral</button>
+      <button role="tab" class="tab" data-tab="analysis" aria-selected="false">Análise &amp; Operação</button>
+      <button role="tab" class="tab" data-tab="journal" aria-selected="false">Diário</button>
+    </nav>
+  </div>
+  <div class="top-r">
+    <span class="pill" id="mktB3">B3 —</span>
+    <span class="pill" id="mktNY">NY —</span>
+    <span class="pill regime-pill" id="regimePill">Regime —</span>
+    <span class="dim upd" id="updated">carregando…</span>
+    <button class="btn btn-sm" id="logout" title="Sair">Sair</button>
+  </div>
+</header>
+<div class="tape" id="tape" aria-label="Cotações principais"></div>
+
+<main>
+  <!-- ================= VISÃO GERAL ================= -->
+  <section class="view" id="view-overview">
+    <div class="grid g-hero">
+      <article class="card regime-card">
+        <header class="card-h"><h2>Termômetro de risco</h2><span class="dim" id="regQuorum"></span></header>
+        <div class="gauge-wrap">
+          <svg class="gauge" viewBox="0 0 220 124" aria-hidden="true">
+            <defs><linearGradient id="gg" x1="0" x2="1"><stop offset="0" stop-color="#ff5d5d"/><stop offset=".5" stop-color="#f5b83d"/><stop offset="1" stop-color="#2fd47f"/></linearGradient></defs>
+            <path d="M20 110 A90 90 0 0 1 200 110" fill="none" stroke="#1d2a38" stroke-width="16" stroke-linecap="round"/>
+            <path d="M20 110 A90 90 0 0 1 200 110" fill="none" stroke="url(#gg)" stroke-width="16" stroke-linecap="round" opacity=".9"/>
+            <line id="needle" x1="110" y1="110" x2="110" y2="34" stroke="#e7edf4" stroke-width="3.5" stroke-linecap="round"/>
+            <circle cx="110" cy="110" r="7" fill="#e7edf4"/>
+          </svg>
+          <div class="gauge-val"><span class="num" id="regScore">—</span><small id="regLabel">—</small></div>
+        </div>
+        <div class="stress" id="regStress" hidden>⚠ Regime de estresse — só estruturas de risco definido</div>
+        <ul class="comps" id="regComps"></ul>
+      </article>
+
+      <article class="card">
+        <header class="card-h"><h2>Brasil · Juros e inflação</h2><span class="dim">BCB / Focus</span></header>
+        <div class="kpis" id="brKpis"></div>
+        <h3 class="sub">Caminho da Selic esperado (Focus) <span class="dim">— substitui a curva de DI</span></h3>
+        <div id="selicPath" class="selic-path"></div>
+      </article>
+
+      <article class="card">
+        <header class="card-h"><h2>Calendário</h2><span class="dim">45 dias</span></header>
+        <ul class="cal" id="calendar"></ul>
+      </article>
+    </div>
+
+    <div class="grid g-macro" id="macroGroups"></div>
+
+    <div class="grid g-2">
+      <article class="card">
+        <header class="card-h"><h2>After-market dos ADRs</h2><span class="dim">prévia da abertura da B3</span></header>
+        <table class="tbl" id="adrs"><thead><tr><th>Ativo</th><th class="r">Fech. NY</th><th class="r">Dia</th><th class="r">After</th><th class="r">After %</th></tr></thead><tbody></tbody></table>
+      </article>
+      <article class="card">
+        <header class="card-h"><h2>Radar de fluxo</h2><span class="dim" id="flowNote"></span></header>
+        <div id="optFlow"></div>
+        <table class="tbl" id="volFlow"><thead><tr><th>Ativo</th><th class="r">Volume / média 20d</th><th class="r">Dia</th><th>Leitura</th></tr></thead><tbody></tbody></table>
+      </article>
+    </div>
+
+    <article class="card">
+      <header class="card-h"><h2>Notícias do mercado</h2><span class="dim" id="newsMeta"></span></header>
+      <div class="news-filter" id="newsFilter"></div>
+      <ul class="news" id="news"></ul>
+    </article>
+  </section>
+
+  <!-- ================= ANÁLISE ================= -->
+  <section class="view" id="view-analysis" hidden>
+    <div class="chips" id="tickers" role="listbox" aria-label="Ativos"></div>
+    <div class="grid g-chart">
+      <article class="card chart-card">
+        <header class="card-h">
+          <div class="asset-title"><h2 id="aTitle">—</h2><span class="num big" id="aPrice">—</span><span class="num" id="aChg"></span></div>
+          <div class="legend"><span class="lg e8">MME8</span><span class="lg e20">MME20</span><span class="lg s200">MMA200</span><span class="lg sr">Suporte/Resistência</span></div>
+        </header>
+        <div id="chart" class="chart" aria-label="Gráfico de candles"></div>
+      </article>
+      <article class="card ta-card">
+        <header class="card-h"><h2>Leitura do grafista</h2><span class="tag" id="taTrend">—</span></header>
+        <div class="scorebar"><div class="scorebar-fill" id="taBar"></div><span class="num" id="taScore">—</span></div>
+        <div class="kpis kpis-3" id="taKpis"></div>
+        <ul class="diag" id="taDiag"></ul>
+        <h3 class="sub">Componentes</h3>
+        <ul class="parts" id="taParts"></ul>
+      </article>
+    </div>
+
+    <article class="card op-card">
+      <header class="card-h">
+        <h2>Gerador de operação</h2>
+        <div class="op-ctl">
+          <div class="field inline"><label for="capital">Capital (R$)</label><input class="input num" id="capital" inputmode="decimal"></div>
+          <div class="field inline"><label for="risk">Risco máx. por operação (%)</label><input class="input num" id="risk" inputmode="decimal"></div>
+          <button class="btn btn-primary" id="gen">Gerar operação</button>
+        </div>
+      </header>
+      <div id="opEmpty" class="empty">Escolha um ativo acima e clique em <b>Gerar operação</b>. O motor cruza macro, gráfico, volatilidade e gregas, testa compra e venda de calls e puts, travas, diagonais, condor e calendário, passa tudo pela camada anti-erro e só então recomenda — ou manda ficar de fora.</div>
+      <div id="opOut" hidden>
+        <div class="decision" id="decision"></div>
+        <div class="grid g-3">
+          <div class="mini"><h4>Viés direcional</h4><div class="num big" id="dirBias"></div><div class="muted" id="dirLbl"></div><ul class="comps sm" id="dirComps"></ul></div>
+          <div class="mini"><h4>Volatilidade</h4><div class="num big" id="volIv"></div><div class="muted" id="volLbl"></div><div class="kpis kpis-2" id="volKpis"></div></div>
+          <div class="mini"><h4>Fonte das opções</h4><div id="chainSrc"></div></div>
+        </div>
+
+        <div id="bestWrap">
+          <h3 class="sec">Operação recomendada</h3>
+          <div class="grid g-best">
+            <div>
+              <div class="best-h"><span class="best-name" id="bestName"></span><span class="score" id="bestScore"></span></div>
+              <table class="tbl legs" id="legs"><thead><tr><th>Perna</th><th>Tipo</th><th class="r">Strike</th><th>Venc.</th><th class="r">Prêmio</th><th class="r">Δ</th><th class="r">Θ/dia</th><th class="r">Vega</th><th class="r">VI</th></tr></thead><tbody></tbody></table>
+              <div class="kpis kpis-4" id="bestKpis"></div>
+            </div>
+            <div class="payoff-box">
+              <div class="payoff-h"><span>Simulação de resultado (1 lote)</span><span class="lg-p"><i class="pe"></i>no vencimento <i class="pn"></i>hoje</span></div>
+              <svg id="payoff" class="payoff" viewBox="0 0 560 260" role="img" aria-label="Gráfico de payoff"></svg>
+            </div>
+          </div>
+          <div class="actions">
+            <button class="btn btn-primary" id="execBtn">Como executar esta estratégia</button>
+            <button class="btn" id="saveBtn">Registrar no diário</button>
+            <span class="dim" id="saveMsg"></span>
+          </div>
+          <ol class="exec" id="exec" hidden></ol>
+        </div>
+
+        <div class="grid g-2">
+          <div>
+            <h3 class="sec">Por que esta decisão</h3>
+            <div id="ai" class="ai" hidden></div>
+            <div id="why" class="why"></div>
+          </div>
+          <div>
+            <h3 class="sec">Camada anti-erro</h3>
+            <div id="checks" class="checks"></div>
+          </div>
+        </div>
+
+        <h3 class="sec">Outras estruturas avaliadas</h3>
+        <div class="alts" id="alts"></div>
+        <p class="disclaimer">Ferramenta de apoio à decisão. Não é recomendação de investimento. Probabilidades vêm de modelo (Black-Scholes/lognormal) e não garantem resultado. Confirme sempre preços e liquidez no seu home broker.</p>
+      </div>
+    </article>
+  </section>
+
+  <!-- ================= DIÁRIO ================= -->
+  <section class="view" id="view-journal" hidden>
+    <article class="card">
+      <header class="card-h"><h2>Diário de operações</h2><span class="dim">mede a assertividade real do sistema</span></header>
+      <div class="kpis kpis-4" id="jStats"></div>
+      <div class="tbl-scroll">
+        <table class="tbl" id="jTbl"><thead><tr><th>Data</th><th>Ativo</th><th>Estrutura</th><th class="r">Lotes</th><th class="r">Custo</th><th class="r">Spot entrada → atual</th><th class="r">Resultado</th><th>Status</th><th></th></tr></thead><tbody></tbody></table>
+      </div>
+      <p class="dim small">Marcação teórica (Black-Scholes com a VI de cada perna na entrada) enquanto não houver grade real; operações vencidas são liquidadas pelo fechamento do dia do vencimento.</p>
+    </article>
+  </section>
+</main>
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+<script src="/vendor/lightweight-charts.js"></script>
+<script src="/app/app.js"></script>
+</body>
+</html>
