@@ -27,9 +27,10 @@ function rationale(res, ctx) {
       `Regime macro: ${ctx.regime.label} (${ctx.regime.score > 0 ? '+' : ''}${ctx.regime.score}).`,
   });
   p.push({ h: 'Gráfico', t: ctx.ta.diagnosis.join(' ') });
+  if (ctx.calib && ctx.calib.msg) p.push({ h: 'Auditoria histórica do sinal (5 anos)', t: ctx.calib.msg });
   p.push({
     h: 'Volatilidade',
-    t: `VI ATM ${pc(vol.atmIv)}${vol.theoretical ? ' (estimada)' : ''} contra vol. histórica 20d de ${pc(vol.hv20)} (razão ${vol.ratio ? vol.ratio.toFixed(2) : '—'}x; percentil da VH ${vol.hvPct != null ? vol.hvPct.toFixed(0) : '—'}). ` +
+    t: `VI ATM ${pc(vol.atmIv)}${vol.theoretical ? ' (estimada)' : ''} contra vol. prevista EWMA de ${pc(vol.ewma)} e vol. histórica 20d de ${pc(vol.hv20)} (VI/EWMA ${vol.ratio ? vol.ratio.toFixed(2) : '—'}x; percentil da VH ${vol.hvPct != null ? vol.hvPct.toFixed(0) : '—'}). ` +
       `Volatilidade considerada ${vol.label.toUpperCase()}${vol.label === 'cara' ? ': vantagem para quem VENDE prêmio' : vol.label === 'barata' ? ': vantagem para quem COMPRA prêmio' : ': sem vantagem clara de vega'}.`,
   });
   if (!best) return p;

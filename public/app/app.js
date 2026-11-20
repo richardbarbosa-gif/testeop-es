@@ -235,7 +235,23 @@
     $('taScore').textContent = 'Pontuação técnica ' + (t.score > 0 ? '+' : '') + Math.round(t.score);
     $('taKpis').innerHTML = kpi('IFR 14', n(t.rsi, 0), t.rsi > 70 ? 'sobrecomprado' : t.rsi < 30 ? 'sobrevendido' : 'neutro') + kpi('ATR 14', n(t.atr), n(t.atr / t.price * 100, 1) + '% do preço') + kpi('Vol. hist. 20d', n(t.hv20 * 100, 1) + '%', 'percentil ' + n(t.hvPct, 0));
     $('taDiag').innerHTML = t.diagnosis.map(function (l) { return '<li>' + esc(l) + '</li>'; }).join('');
+    renderAudit(a);
     $('taParts').innerHTML = t.parts.map(function (p) { return '<li><span>' + esc(p.why) + '</span><span class="num ' + sgn(p.val) + '">' + (p.val > 0 ? '+' : '') + n(p.val, 0) + '</span></li>'; }).join('');
+  }
+
+  function renderAudit(a) {
+    var c = a.calib, v = a.audit || {};
+    if (!c || !c.ok) { $('taAudit').innerHTML = '<p class="dim small">' + esc((c && c.reason) || 'Auditoria indisponível.') + '</p>'; return; }
+    var cls = { edge: 'up', contrary: 'down', noedge: 'neu', unknown: 'neu', neutral: '' }[v.status] || '';
+    var lbl = { edge: 'SINAL COM VANTAGEM', contrary: 'SINAL HISTORICAMENTE CONTRÁRIO', noedge: 'SINAL SEM VANTAGEM', unknown: 'AMOSTRA INSUFICIENTE', neutral: 'LATERAL' }[v.status] || '';
+    var cur = v.bucket ? v.bucket.id : null;
+    var rows = c.buckets.map(function (b) {
+      var hit = b.hit != null ? n(b.hit * 100, 0) + '%' : '—';
+      var base = b.base != null ? n(b.base * 100, 0) + '%' : '—';
+      var z = b.z != null ? n(b.z, 1) : '—';
+      return '<tr class="' + (b.id === cur ? 'cur' : '') + '"><td>' + esc(b.label) + '</td><td class="r num">' + b.n + '</td><td class="r num">' + hit + '</td><td class="r num dim">' + base + '</td><td class="r num ' + sgn(b.avgFwd) + '">' + pct(b.avgFwd) + '</td><td class="r num">' + z + '</td></tr>';
+    }).join('');
+    $('taAudit').innerHTML = '<span class="flag ' + cls + '">' + lbl + '</span><p class="small" style="margin:8px 0">' + esc(v.msg || '') + '</p><table class="tbl"><thead><tr><th>Faixa</th><th class="r">Ocorr.</th><th class="r">Acerto</th><th class="r">Base</th><th class="r">Ret. médio</th><th class="r">z</th></tr></thead><tbody>' + rows + '</tbody></table>';
   }
 
   // ---------------- operação ----------------
@@ -270,7 +286,7 @@
     }).join('');
     $('volIv').textContent = 'VI ' + n(o.vol.atmIv * 100, 1) + '%';
     $('volLbl').textContent = 'Volatilidade ' + o.vol.label + (o.vol.theoretical ? ' (VI estimada)' : '');
-    $('volKpis').innerHTML = kpi('Vol. hist. 20d', n(o.vol.hv20 * 100, 1) + '%') + kpi('VI / VH', o.vol.ratio ? n(o.vol.ratio, 2) + 'x' : '—') + kpi('Percentil VH', n(o.vol.hvPct, 0)) + kpi('IV Rank', o.vol.ivRank != null ? n(o.vol.ivRank, 0) : 'em formação');
+    $('volKpis').innerHTML = kpi('Vol. prevista (EWMA)', n(o.vol.ewma * 100, 1) + '%', 'VH 20d ' + n(o.vol.hv20 * 100, 1) + '%') + kpi('VI / EWMA', o.vol.ratio ? n(o.vol.ratio, 2) + 'x' : '—') + kpi('Percentil VH', n(o.vol.hvPct, 0)) + kpi('IV Rank', o.vol.ivRank != null ? n(o.vol.ivRank, 0) : 'em formação');
     $('chainSrc').innerHTML = '<div class="tag ' + (o.chain.real ? 'up' : '') + '">' + esc(o.chain.source) + '</div><p class="muted small" style="margin:8px 0 0">' + (o.chain.real ? 'Grade real com bid/ask, volume e contratos em aberto.' : 'Sem grade real conectada: strikes e prêmios são <b>teóricos</b> (' + esc(o.chain.volMethod || '') + '). Use como mapa e confirme no book.') + '</p>' + (o.chain.providerErrors.length ? '<p class="small down">' + esc(o.chain.providerErrors.join(' · ')) + '</p>' : '') + '<p class="dim small" style="margin:6px 0 0">Juros ' + n(o.inputs.r * 100) + '% · dividend yield ' + n(o.inputs.q * 100, 1) + '%</p>';
 
     var best = o.best;

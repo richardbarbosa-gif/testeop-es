@@ -54,3 +54,30 @@ test('Anti-erro bloqueia venda descoberta e posição sem caixa', () => {
   assert.ok(r.blocked);
   assert.ok(r.blocks.some((b) => /ilimitada/.test(b)));
 });
+
+test('EWMA de retornos constantes tende ao desvio correto', () => {
+  // retornos alternando ±1% => vol diária 1% => anual ≈ 15,87%
+  const c = [100];
+  for (let i = 0; i < 400; i++) c.push(c[c.length - 1] * Math.exp(i % 2 ? 0.01 : -0.01));
+  near(ta.ewmaVol(c), 0.01 * Math.sqrt(252), 1e-3, 'ewma');
+});
+
+test('Auditoria: classifica vantagem, ausência e sinal contrário', () => {
+  const mk = (hit, base, n, nEff) => ({ ok: true, horizon: 10, years: 4, samples: 1000, baseUp: base, buckets: [
+    { id: 'bf', label: 'baixa forte', dir: -1, n, nEff, hit, base: 1 - base, edge: hit - (1 - base), z: (hit - (1 - base)) / Math.sqrt((base * (1 - base)) / nEff), avgFwd: 0 },
+    { id: 'n', label: 'lateral', dir: 0, n: 10 }] });
+  assert.strictEqual(ta.calibVerdict(mk(0.70, 0.5, 200, 40), -80).status, 'edge');
+  assert.strictEqual(ta.calibVerdict(mk(0.52, 0.5, 200, 40), -80).status, 'noedge');
+  assert.strictEqual(ta.calibVerdict(mk(0.30, 0.5, 200, 40), -80).status, 'contrary');
+  assert.strictEqual(ta.calibVerdict(mk(0.90, 0.5, 10, 3), -80).status, 'unknown');
+});
+
+test('Auditoria não olha o futuro: alterar candles futuros não muda a pontuação do passado', () => {
+  const base = [];
+  let p = 50;
+  for (let i = 0; i < 400; i++) { p *= 1 + Math.sin(i / 9) * 0.01; base.push({ t: i * 86400, o: p, h: p * 1.01, l: p * 0.99, c: p, v: 1000 }); }
+  const a = ta.analyze(base.slice(0, 300), { lite: true }).score;
+  const mod = base.map((x, i) => (i >= 300 ? { ...x, c: x.c * 3, h: x.h * 3, l: x.l * 3, o: x.o * 3 } : x));
+  const b = ta.analyze(mod.slice(0, 300), { lite: true }).score;
+  assert.strictEqual(a, b);
+});

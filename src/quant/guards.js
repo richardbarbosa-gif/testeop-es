@@ -35,6 +35,12 @@ function contextGuards(ctx, dir, vol, chain) {
 
   out.push(check('conflict', 'Mercado', 'Técnico x macro', dir.conflict ? 'block' : 'ok',
     dir.conflict ? `Sinais fortes e opostos: técnico ${ctx.ta.score > 0 ? '+' : ''}${ctx.ta.score} contra macro ${ctx.regime.score > 0 ? '+' : ''}${ctx.regime.score}. Ficar de fora é a decisão profissional.` : 'Sem conflito forte entre gráfico e macro.'));
+  const cv = ctx.calib;
+  if (cv) {
+    // Só alerta aqui: o veto às estruturas direcionais no sentido do sinal fica na decisão (estruturas neutras seguem válidas).
+    const st = cv.status === 'edge' ? 'ok' : 'warn';
+    out.push(check('audit', 'Mercado', 'Auditoria histórica do sinal técnico', cv.status === 'neutral' ? 'ok' : st, cv.msg));
+  }
   if (ctx.regime.stress) out.push(check('stress', 'Mercado', 'Regime de estresse', 'warn', 'VIX ≥ 30 ou VXEWZ ≥ 45: apenas estruturas de risco definido são permitidas; gaps prováveis.'));
   if (ctx.lead && ctx.lead.adrPost && Math.abs(ctx.lead.adrPost) >= 2) out.push(check('gap', 'Mercado', 'Gap esperado na abertura', 'warn', `ADR/EWZ moveu ${ctx.lead.adrPost.toFixed(1)}% no after-market: a abertura deve ter gap; não envie ordem a mercado no leilão.`));
   const soon = (ctx.eventsAll || []).filter((e) => e.daysAway <= 2 && e.impact >= 3);
@@ -111,6 +117,8 @@ function runGuards(a, ctx, dir, vol, chain) {
     const burn = l.theta && l.mid ? Math.abs(l.theta) / l.mid * 100 : null;
     if (burn != null) c.push(check('theta-burn', 'Risco', 'Perda diária por theta', burn > 2.5 ? 'warn' : 'ok', `Theta consome ${burn.toFixed(2)}% do prêmio por dia.`));
   }
+  c.push(check('ev', 'Risco', 'Expectativa no cenário calibrado', a.evSys > 0 ? 'ok' : 'warn',
+    `Valor esperado ${a.evSys >= 0 ? '+' : ''}${(a.evSys * a.lot).toFixed(2)} por lote (média do resultado pela distribuição calibrada no histórico do ativo).`));
   if (ctx.events && ctx.events.length) c.push(check('events', 'Risco', 'Eventos antes do vencimento', 'warn', ctx.events.map((e) => `${e.title} ${e.date}`).join('; ')));
   if (ctx.market === 'B3' && a.legs.some((l) => l.type === 'call' && l.side < 0) && ctx.q > 0.04) c.push(check('div', 'Risco', 'Dividendos x call vendida', 'warn', `Dividend yield estimado ${(ctx.q * 100).toFixed(1)}%: call vendida (americana) pode ser exercida antes da data-com. Confirme a agenda de proventos.`));
   if (ctx.regime.stress && !isDebit) c.push(check('stress-credit', 'Risco', 'Crédito em estresse', 'warn', 'Venda de prêmio em estresse: prêmios gordos, mas gaps podem levar à perda máxima rapidamente.'));

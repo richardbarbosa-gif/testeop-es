@@ -131,7 +131,7 @@ function structure(c, k = 3, lookback = 120) {
 
 const pct = (a, b) => (a / b - 1) * 100;
 
-function analyze(candles) {
+function analyze(candles, { lite = false } = {}) {
   if (!candles || candles.length < 60) return { ok: false, error: 'Histórico insuficiente para análise técnica.' };
   const closes = candles.map((x) => x.c);
   const vols = candles.map((x) => x.v);
@@ -191,6 +191,7 @@ function analyze(candles) {
   if (volRatio && volRatio > 1.6) add('Volume', dayChg >= 0 ? 6 : -6, `volume ${volRatio.toFixed(1)}x a média de 20 pregões em dia de ${dayChg >= 0 ? 'alta' : 'queda'} (convicção)`);
 
   const score = Math.max(-100, Math.min(100, parts.reduce((s, p) => s + p.val, 0)));
+  if (lite) return { ok: true, score };
   let trend = 'lateral';
   if (score >= 45) trend = 'alta forte';
   else if (score >= 15) trend = 'alta';
@@ -221,6 +222,7 @@ function analyze(candles) {
     atr: atrNow,
     hv20: hvNow,
     hv60: L(hv60),
+    ewma: ewmaVol(closes.slice(-260)),
     hvPct,
     volRatio,
     hi52, lo52, hi20, lo20,
@@ -236,4 +238,75 @@ function analyze(candles) {
   };
 }
 
-module.exports = { analyze, sma, ema, rsi, atr, histVol, percentileRank };
+// ---------- Auto-auditoria do sinal técnico ----------
+// Recalcula a pontuação técnica em cada pregão do passado (só com dados disponíveis
+// naquele dia — sem olhar o futuro) e mede o retorno dos h pregões seguintes.
+// O acerto de cada faixa é comparado à TAXA-BASE do ativo no mesmo período:
+// vantagem real = acerto da faixa − frequência incondicional daquele resultado.
+const BUCKETS = [
+  { id: 'bf', label: 'baixa forte', min: -101, max: -45, dir: -1 },
+  { id: 'b', label: 'baixa', min: -45, max: -15, dir: -1 },
+  { id: 'n', label: 'lateral', min: -15, max: 15, dir: 0 },
+  { id: 'a', label: 'alta', min: 15, max: 45, dir: 1 },
+  { id: 'af', label: 'alta forte', min: 45, max: 101, dir: 1 },
+];
+function bucketOf(score) {
+  return BUCKETS.find((b) => score > b.min && score <= b.max) || BUCKETS[2];
+}
+
+function calibrate(candles, { horizon = 10, maxSamples = 1000, minHistory = 220, window = 320 } = {}) {
+  const n = candles.length;
+  const start = Math.max(minHistory, n - horizon - maxSamples);
+  const samples = [];
+  for (let t = start; t < n - horizon; t++) {
+    // Janela móvel (custo constante por dia); só dados até o dia t — sem olhar o futuro.
+    const r = analyze(candles.slice(Math.max(0, t + 1 - window), t + 1), { lite: true });
+    if (!r.ok) continue;
+    samples.push({ t, score: r.score, fwd: candles[t + horizon].c / candles[t].c - 1 });
+  }
+  if (samples.length < 120) return { ok: false, reason: 'histórico insuficiente para auditoria', samples: samples.length };
+  const baseUp = samples.filter((x) => x.fwd > 0).length / samples.length;
+  const out = BUCKETS.map((b) => {
+    const xs = samples.filter((x) => x.score > b.min && x.score <= b.max);
+    if (!xs.length) return { ...b, n: 0 };
+    // Amostras sobrepostas: conta episódios (blocos contíguos) e usa o maior entre episódios e n/h.
+    let episodes = 0;
+    for (let i = 0; i < xs.length; i++) if (i === 0 || xs[i].t - xs[i - 1].t > 1) episodes++;
+    const nEff = Math.max(episodes, xs.length / horizon);
+    const avg = xs.reduce((a, x) => a + x.fwd, 0) / xs.length;
+    let hit = null, base = null, z = null;
+    if (b.dir !== 0) {
+      hit = xs.filter((x) => (b.dir > 0 ? x.fwd > 0 : x.fwd < 0)).length / xs.length;
+      base = b.dir > 0 ? baseUp : 1 - baseUp;
+      z = (hit - base) / Math.sqrt(Math.max(1e-9, (base * (1 - base)) / nEff));
+    }
+    return { ...b, n: xs.length, nEff: +nEff.toFixed(1), hit, base, edge: hit != null ? hit - base : null, z, avgFwd: avg * 100 };
+  });
+  return { ok: true, horizon, samples: samples.length, years: +(samples.length / 252).toFixed(1), baseUp, buckets: out };
+}
+
+// Veredito para a pontuação ATUAL, com força da evidência (escore-z unilateral).
+function calibVerdict(calib, score) {
+  if (!calib || !calib.ok) return { status: 'unknown', msg: 'Sem auditoria histórica (histórico insuficiente).' };
+  const b = calib.buckets.find((x) => x.id === bucketOf(score).id);
+  if (!b || b.dir === 0) return { status: 'neutral', bucket: b, msg: 'Sinal técnico lateral: nada a auditar.' };
+  if (b.n < 25 || b.nEff < 6) return { status: 'unknown', bucket: b, msg: `Faixa "${b.label}" ocorreu ${b.n} vezes (~${Math.round(b.nEff)} episódios) em ${calib.years} anos: amostra insuficiente para concluir.` };
+  const pp = (x) => `${(x * 100).toFixed(0)}%`;
+  const force = Math.abs(b.z) >= 2 ? 'forte' : Math.abs(b.z) >= 1 ? 'moderada' : 'fraca';
+  const txt = `Em ${calib.years} anos, com pontuação "${b.label}", o ativo ${b.dir > 0 ? 'subiu' : 'caiu'} em ${pp(b.hit)} das janelas de ${calib.horizon} pregões (taxa-base ${pp(b.base)}; retorno médio ${b.avgFwd >= 0 ? '+' : ''}${b.avgFwd.toFixed(2)}%; ${b.n} ocorrências, ~${Math.round(b.nEff)} episódios; z=${b.z.toFixed(2)}, evidência ${force}).`;
+  if (b.edge <= -0.05 && b.z <= -1) return { status: 'contrary', bucket: b, force, msg: `${txt} O sinal funcionou CONTRA neste ativo (tende a reverter).` };
+  if (b.edge >= 0.04 && b.z >= 1) return { status: 'edge', bucket: b, force, msg: `${txt} Vantagem de ${(b.edge * 100).toFixed(0)} p.p. sobre a taxa-base.` };
+  return { status: 'noedge', bucket: b, force, msg: `${txt} Sem vantagem estatisticamente distinguível do acaso.` };
+}
+
+// Volatilidade EWMA (RiskMetrics, λ=0.94) anualizada — previsão de curto prazo.
+function ewmaVol(closes, lambda = 0.94, periods = 252) {
+  if (closes.length < 30) return null;
+  const rets = [];
+  for (let i = 1; i < closes.length; i++) rets.push(Math.log(closes[i] / closes[i - 1]));
+  let v = rets.slice(0, 20).reduce((a, r) => a + r * r, 0) / 20;
+  for (let i = 20; i < rets.length; i++) v = lambda * v + (1 - lambda) * rets[i] * rets[i];
+  return Math.sqrt(v * periods);
+}
+
+module.exports = { analyze, calibrate, calibVerdict, bucketOf, ewmaVol, sma, ema, rsi, atr, histVol, percentileRank };

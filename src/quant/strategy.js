@@ -13,8 +13,12 @@ const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
 // ---------------- Visões ----------------
 function directionalView(ctx) {
   const { ta, regime, lead, newsTag } = ctx;
+  const cv = ctx.calib || { status: 'unknown' };
+  // Peso do gráfico conforme a auditoria histórica do sinal NESTE ativo.
+  const AUD = { contrary: [0.3, 0.6, 'auditado: historicamente contrário'], noedge: [0.6, 0.8, 'auditado: sem vantagem'], edge: [1.15, 1.1, 'auditado: com vantagem'], unknown: [0.85, 0.9, 'sem auditoria conclusiva'], neutral: [1, 1, 'lateral'] };
+  const [wMul, cMul, audLabel] = AUD[cv.status] || AUD.unknown;
   const comps = [];
-  comps.push({ id: 'tech', label: 'Técnico (gráfico)', score: ta.score, w: 0.5 });
+  comps.push({ id: 'tech', label: `Técnico (${audLabel})`, score: ta.score, w: 0.5 * wMul });
   comps.push({ id: 'macro', label: 'Macro / regime de risco', score: regime.score, w: 0.25 });
   if (lead && Number.isFinite(lead.score)) comps.push({ id: 'lead', label: lead.label, score: lead.score, w: 0.15 });
   if (newsTag && newsTag.n >= 3) comps.push({ id: 'news', label: `Notícias (${newsTag.n} manchetes)`, score: clamp((newsTag.s / newsTag.n) * 40, -100, 100), w: 0.1 });
@@ -24,14 +28,14 @@ function directionalView(ctx) {
   const active = comps.filter((c) => Math.abs(c.score) >= 8);
   const agreement = active.length ? active.filter((c) => Math.sign(c.score) === sgn).reduce((a, c) => a + c.w, 0) / active.reduce((a, c) => a + c.w, 0) : 0;
   const quorumF = clamp((regime.quorum || 0) / 100, 0.5, 1);
-  let confidence = Math.min(100, Math.abs(bias) * 1.7) * (0.4 + 0.6 * agreement) * quorumF * (regime.stress ? 0.8 : 1);
+  let confidence = Math.min(100, Math.abs(bias) * 1.7) * (0.4 + 0.6 * agreement) * quorumF * (regime.stress ? 0.8 : 1) * cMul;
   confidence = Math.round(clamp(confidence, 0, 100));
   let label = 'neutra';
   if (bias >= 15) label = bias >= 40 ? 'altista forte' : 'altista';
   else if (bias <= -15) label = bias <= -40 ? 'baixista forte' : 'baixista';
   // Conflito: técnico e macro fortes em sentidos opostos.
   const conflict = Math.abs(ta.score) >= 30 && Math.abs(regime.score) >= 30 && Math.sign(ta.score) !== Math.sign(regime.score);
-  return { bias: Math.round(bias), label, confidence, agreement: Math.round(agreement * 100), comps, conflict };
+  return { bias: Math.round(bias), label, confidence, agreement: Math.round(agreement * 100), comps, conflict, audit: cv };
 }
 
 function volView(ctx, chain) {
@@ -42,13 +46,14 @@ function volView(ctx, chain) {
     const atm = exp.options.filter((o) => o.iv).sort((a, b) => Math.abs(a.strike - ctx.S) - Math.abs(b.strike - ctx.S)).slice(0, 4);
     if (atm.length) atmIv = atm.reduce((a, o) => a + o.iv, 0) / atm.length;
   }
-  const hv = ta.hv20, hvPct = ta.hvPct;
+  // Referência de vol. realizada: previsão EWMA (reage rápido) quando disponível, senão VH20.
+  const hv = ta.ewma || ta.hv20, hvPct = ta.hvPct;
   const ratio = atmIv && hv ? atmIv / hv : null;
   const ivRank = ctx.ivHistory ? ctx.ivHistory.rank : null;
   let label = 'justa';
   if ((ratio && ratio > 1.25) || (ivRank != null && ivRank > 65)) label = 'cara';
   else if (ratio && ratio < 0.95 && (hvPct == null || hvPct < 55) && (ivRank == null || ivRank < 40)) label = 'barata';
-  return { atmIv, hv20: hv, hv60: ta.hv60, hvPct, ratio, ivRank, label, expiry: exp ? exp.date : null, theoretical: !chain.real };
+  return { atmIv, hv20: ta.hv20, ewma: ta.ewma, hv60: ta.hv60, hvPct, ratio, ivRank, label, expiry: exp ? exp.date : null, theoretical: !chain.real };
 }
 
 // ---------------- Seleção na grade ----------------
@@ -169,8 +174,17 @@ function analyzeCandidate(c, ctx, dir, vol) {
   const T = horizon / 365;
   const rn = bs.lognormalGrid(S, T, sigma, ctx.r - ctx.q);
   const pop = rn.reduce((a, p) => a + (pnlAt(p.s, horizon) > 0 ? p.w : 0), 0);
-  // Cenário do sistema: desloca a média em até 0,25 desvio conforme o viés (modesto de propósito).
-  const tilt = (dir.bias / 100) * 0.25 * sigma * Math.sqrt(T);
+  // Cenário do sistema: deslocamento da média = retorno histórico médio da faixa atual do sinal
+  // neste ativo, escalado ao prazo e encolhido para zero conforme a amostra (bayesiano).
+  // Sem auditoria conclusiva => cenário neutro (risco-neutro). Limitado a ±0,5 desvio.
+  let tilt = 0;
+  const bk = ctx.calib && ctx.calib.bucket;
+  if (bk && bk.n >= 25 && Number.isFinite(bk.avgFwd)) {
+    const shrink = bk.nEff / (bk.nEff + 30);
+    const tradingDays = horizon * 252 / 365;
+    tilt = Math.log(1 + (bk.avgFwd / 100) * (tradingDays / (ctx.calibHorizon || 10))) * shrink;
+    tilt = clamp(tilt, -0.5 * sigma * Math.sqrt(T), 0.5 * sigma * Math.sqrt(T));
+  }
   const sys = bs.lognormalGrid(S * Math.exp(tilt), T, sigma, ctx.r - ctx.q);
   const evSys = sys.reduce((a, p) => a + pnlAt(p.s, horizon) * p.w, 0);
   const popSys = sys.reduce((a, p) => a + (pnlAt(p.s, horizon) > 0 ? p.w : 0), 0);
@@ -275,6 +289,9 @@ function scoreCandidate(a, dir, vol, ctx) {
     if (a.beVsExpMove > 1) add(-10, 'ponto de equilíbrio além do movimento esperado pela VI');
     else if (a.beVsExpMove < 0.5) add(5, 'ponto de equilíbrio próximo: exige pouco movimento');
   }
+  const au = ctx.calib && ctx.calib.status;
+  if (directional && au === 'contrary' && ctx.calib.bucket && Math.sign(a.greeks.delta) === ctx.calib.bucket.dir) add(-14, 'sinal técnico historicamente contrário neste ativo');
+  if (directional && au === 'edge' && ctx.calib.bucket && Math.sign(a.greeks.delta) === ctx.calib.bucket.dir) add(6, 'sinal técnico com vantagem histórica comprovada neste ativo');
   if (a.evSys > 0) add(4, 'expectativa positiva no cenário do sistema');
   else add(-4, 'expectativa negativa no cenário do sistema');
   if (ctx.events && ctx.events.length && !a.debit) add(-5, `${ctx.events.length} evento(s) de alto impacto antes do vencimento (risco de gap)`);
@@ -314,6 +331,15 @@ function generate(ctx, chain) {
   if (!best) { decision = 'NÃO OPERAR'; reasons.push('Nenhuma estrutura passou pela camada anti-erro.'); }
   else if (best.score < 58) { decision = 'NÃO OPERAR'; reasons.push(`Melhor estrutura com nota ${best.score}/100 (mínimo exigido: 58).`); }
   if (dir.confidence < 35 && best && !['neutra-credito', 'calendario'].includes(best.family)) { decision = 'NÃO OPERAR'; reasons.push(`Confiança direcional baixa (${dir.confidence}/100).`); }
+  if (best && !(best.evSys > 0)) {
+    decision = 'NÃO OPERAR';
+    reasons.push(`Expectativa ${best.evSys >= 0 ? 'nula' : 'negativa'} (${best.evSys.toFixed(3)} por opção) no cenário calibrado pelo histórico do ativo: sem vantagem matemática.`);
+  }
+  const aud = dir.audit || {};
+  if (best && aud.status === 'contrary' && aud.bucket && !['neutra-credito', 'neutra-debito', 'calendario'].includes(best.family) && Math.sign(best.greeks.delta) === aud.bucket.dir) {
+    decision = 'NÃO OPERAR';
+    reasons.push(`O sinal técnico que sustenta a operação historicamente REVERTEU neste ativo (acerto ${(aud.bucket.hit * 100).toFixed(0)}% vs taxa-base ${(aud.bucket.base * 100).toFixed(0)}%).`);
+  }
   const ext = stretch(ctx);
   if (ext) ctxChecks.push({ id: 'stretch', group: 'Mercado', label: 'Movimento esticado', status: 'warn', detail: `Ativo ${ext.msg}. Prefira entrada escalonada (metade agora, metade num repique) ou trava.` });
   if (decision === 'OPERAR' && !chain.real) { decision = 'OPERAR — CONFIRMAR NO BOOK'; reasons.push('Preços teóricos: confirme série, prêmio e liquidez reais antes de enviar a ordem.'); }

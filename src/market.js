@@ -78,8 +78,12 @@ function dividendYield(hist, price) {
 async function asset(ticker) {
   const u = UNDERLYINGS[ticker];
   if (!u) throw Object.assign(new Error('Ativo não suportado'), { status: 400 });
-  const [hist, q] = await Promise.all([yahoo.history(u.y, '2y', '1d'), yahoo.quote(u.y)]);
+  const [hist, q, long] = await Promise.all([yahoo.history(u.y, '2y', '1d'), yahoo.quote(u.y), yahoo.history(u.y, '5y', '1d').catch(() => null)]);
   const analysis = ta.analyze(hist.candles);
+  // Auditoria do sinal técnico em 5 anos (cache por ativo e por último pregão).
+  const lastT = hist.candles.length ? hist.candles[hist.candles.length - 1].t : 0;
+  const calib = long ? await cached(`calib:${ticker}:${lastT}`, 12 * 3600e3, async () => ta.calibrate(long.candles)) : { ok: false, reason: 'sem histórico longo' };
+  const verdict = analysis.ok ? ta.calibVerdict(calib, analysis.score) : { status: 'unknown', msg: '' };
   return {
     ticker,
     name: u.name,
@@ -88,6 +92,8 @@ async function asset(ticker) {
     meta: hist.meta,
     candles: hist.candles.map((c) => ({ time: c.t, open: c.o, high: c.h, low: c.l, close: c.c, volume: c.v })),
     ta: analysis,
+    calib,
+    audit: verdict,
     dividendYield: dividendYield(hist, q.price),
   };
 }
@@ -173,6 +179,8 @@ async function operation(ticker, { capital, riskPct } = {}) {
     lead,
     newsTag,
     ivHistory: ivh,
+    calib: a.audit,
+    calibHorizon: a.calib && a.calib.horizon,
     ivFallback: vm.base,
     strikeStep: opt.strikeStep(S, u.market),
     capital: Number(capital) > 0 ? Number(capital) : config.risk.capital,
