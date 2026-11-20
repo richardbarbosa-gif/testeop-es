@@ -1,43 +1,86 @@
 'use strict';
-// Motor de estratégias.
-// 1) Visão direcional = técnico + macro + "lead" (ADR no after / commodity) + notícias.
-// 2) Visão de volatilidade = VI vs vol. histórica (+ percentil).
-// 3) Gera candidatas reais a partir da grade, calcula payoff/gregas/probabilidades.
-// 4) Pontua cada uma pela aderência ao cenário e submete à camada anti-erro (guards).
-// 5) Recomenda a melhor APROVADA — ou "NÃO OPERAR".
+// Motor de estratégias (v2).
+//
+// 1) VIÉS: gráfico e macro entram pelo que REALMENTE aconteceu neste ativo (escore-z do retorno
+//    excedente nos últimos ~5 anos), não por suposição. Antecedentes (ADR/commodity) e notícias
+//    entram com peso pequeno. Confiança = força estatística combinada (Stouffer).
+// 2) VOLATILIDADE: VI vs volatilidade PREVISTA (EWMA convergindo para a média de longo prazo).
+//    Vantagem de vol. só é contada quando a VI é real (grade real ou VXEWZ para o EWZ).
+// 3) CANDIDATAS: menu completo (alta, baixa e neutras), sempre.
+// 4) EXPECTATIVA: cada estrutura é precificada pela VI (mercado) e avaliada sob a distribuição
+//    "real" (vol. prevista + drift calibrado com encolhimento bayesiano). Ranking por
+//    expectativa/risco + aderência ao cenário, depois a camada anti-erro.
+// 5) DECISÃO EM NÍVEIS: OPERAR · OPERAR COM TAMANHO REDUZIDO ·
+//    NÃO VALE A PENA — MAS SE QUISER, O MAIS INDICADO É… (estrutura de menor dano esperado,
+//    risco definido, tamanho reduzido), com gatilhos do que mudaria a decisão.
 const bs = require('./bs');
 const { runGuards, contextGuards } = require('./guards');
 
 const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
+const NEUTRAL_FAMS = ['neutra-credito', 'neutra-debito', 'calendario'];
 
-// ---------------- Visões ----------------
-function directionalView(ctx) {
-  const { ta, regime, lead, newsTag } = ctx;
-  const cv = ctx.calib || { status: 'unknown' };
-  // Peso do gráfico conforme a auditoria histórica do sinal NESTE ativo.
-  const AUD = { contrary: [0.3, 0.6, 'auditado: historicamente contrário'], noedge: [0.6, 0.8, 'auditado: sem vantagem'], edge: [1.15, 1.1, 'auditado: com vantagem'], unknown: [0.85, 0.9, 'sem auditoria conclusiva'], neutral: [1, 1, 'lateral'] };
-  const [wMul, cMul, audLabel] = AUD[cv.status] || AUD.unknown;
-  const comps = [];
-  comps.push({ id: 'tech', label: `Técnico (${audLabel})`, score: ta.score, w: 0.5 * wMul });
-  comps.push({ id: 'macro', label: 'Macro / regime de risco', score: regime.score, w: 0.25 });
-  if (lead && Number.isFinite(lead.score)) comps.push({ id: 'lead', label: lead.label, score: lead.score, w: 0.15 });
-  if (newsTag && newsTag.n >= 3) comps.push({ id: 'news', label: `Notícias (${newsTag.n} manchetes)`, score: clamp((newsTag.s / newsTag.n) * 40, -100, 100), w: 0.1 });
-  const wsum = comps.reduce((a, c) => a + c.w, 0);
-  const bias = comps.reduce((a, c) => a + c.score * c.w, 0) / wsum;
-  const sgn = Math.sign(bias);
-  const active = comps.filter((c) => Math.abs(c.score) >= 8);
-  const agreement = active.length ? active.filter((c) => Math.sign(c.score) === sgn).reduce((a, c) => a + c.w, 0) / active.reduce((a, c) => a + c.w, 0) : 0;
-  const quorumF = clamp((regime.quorum || 0) / 100, 0.5, 1);
-  let confidence = Math.min(100, Math.abs(bias) * 1.7) * (0.4 + 0.6 * agreement) * quorumF * (regime.stress ? 0.8 : 1) * cMul;
-  confidence = Math.round(clamp(confidence, 0, 100));
-  let label = 'neutra';
-  if (bias >= 15) label = bias >= 40 ? 'altista forte' : 'altista';
-  else if (bias <= -15) label = bias <= -40 ? 'baixista forte' : 'baixista';
-  // Conflito: técnico e macro fortes em sentidos opostos.
-  const conflict = Math.abs(ta.score) >= 30 && Math.abs(regime.score) >= 30 && Math.sign(ta.score) !== Math.sign(regime.score);
-  return { bias: Math.round(bias), label, confidence, agreement: Math.round(agreement * 100), comps, conflict, audit: cv };
+// ---------------- Volatilidade prevista ----------------
+// Variância média esperada até o horizonte: converge da EWMA para a vol. de longo prazo
+// com meia-vida de 20 pregões (estrutura de termo tipo GARCH, sem estimar parâmetros frágeis).
+function physVol(ta, calendarDays) {
+  const lr = ta.hv252 || ta.hv60 || ta.hv20;
+  const now = ta.ewma || ta.hv20 || lr;
+  if (!lr || !now) return null;
+  const h = Math.max(1, (calendarDays * 252) / 365);
+  const k = Math.LN2 / 20;
+  const w = (1 - Math.exp(-k * h)) / (k * h);
+  return Math.sqrt(lr * lr + (now * now - lr * lr) * w);
 }
 
+// ---------------- Viés direcional ----------------
+function directionalView(ctx) {
+  const { ta, regime, lead, newsTag } = ctx;
+  const comps = [];
+  const zs = [];
+  const tb = ctx.techAudit && ctx.techAudit.bucket;
+  if (tb && tb.n >= 25 && tb.nEff >= 6 && Number.isFinite(tb.zMean)) {
+    comps.push({ id: 'tech', label: `Gráfico — faixa "${tb.label}" (histórico)`, score: clamp(tb.zMean * 30, -100, 100), w: 0.42, z: tb.zMean, raw: ta.score });
+    zs.push(tb.zMean);
+  } else {
+    comps.push({ id: 'tech', label: 'Gráfico (sem histórico conclusivo)', score: ta.score * 0.35, w: 0.42, z: null, raw: ta.score });
+  }
+  const mb = ctx.macroAudit && ctx.macroAudit.bucket;
+  if (mb && mb.n >= 25 && mb.nEff >= 6 && Number.isFinite(mb.zMean)) {
+    comps.push({ id: 'macro', label: `Macro — regime "${mb.label}" (histórico)`, score: clamp(mb.zMean * 30, -100, 100), w: 0.42, z: mb.zMean, raw: regime.score });
+    zs.push(mb.zMean);
+  } else {
+    comps.push({ id: 'macro', label: 'Macro (sem calibração)', score: 0, w: 0.2, z: null, raw: regime.score });
+  }
+  if (lead && Number.isFinite(lead.score)) comps.push({ id: 'lead', label: lead.label, score: lead.score, w: 0.1 });
+  if (newsTag && newsTag.n >= 3) comps.push({ id: 'news', label: `Notícias (${newsTag.n} manchetes)`, score: clamp((newsTag.s / newsTag.n) * 40, -100, 100), w: 0.06 });
+  const wsum = comps.reduce((a, c) => a + c.w, 0);
+  const bias = comps.reduce((a, c) => a + c.score * c.w, 0) / wsum;
+
+  // Confiança estatística: Stouffer dos escores-z calibrados.
+  const zc = zs.length ? zs.reduce((a, b) => a + b, 0) / Math.sqrt(zs.length) : 0;
+  let confidence = (2 * bs.normCdf(Math.abs(zc) / 1.5) - 1) * 100;
+  confidence *= clamp((regime.quorum || 0) / 100, 0.5, 1) * (regime.stress ? 0.85 : 1);
+  if (lead && Math.abs(lead.score) >= 30 && Math.sign(lead.score) === Math.sign(bias)) confidence += 4;
+  confidence = Math.round(clamp(confidence, 0, 100));
+
+  let label = 'neutra';
+  if (bias >= 12) label = bias >= 35 ? 'altista forte' : 'altista';
+  else if (bias <= -12) label = bias <= -35 ? 'baixista forte' : 'baixista';
+  const zt = comps[0].z, zm = comps[1].z;
+  const conflict = zt != null && zm != null && Math.abs(zt) >= 1 && Math.abs(zm) >= 1 && Math.sign(zt) !== Math.sign(zm);
+
+  // Retorno esperado (10 pregões) para o cenário calibrado. As duas auditorias usam o MESMO
+  // histórico do ativo, então não somam informação independente: média ponderada e peso de
+  // encolhimento pela amostra média. Prior (peso restante) = forward risco-neutro do mercado.
+  const parts = [tb, mb].filter((b) => b && b.n >= 25 && b.nEff >= 6 && Number.isFinite(b.avgFwd));
+  const nBar = parts.length ? parts.reduce((a, b) => a + b.nEff, 0) / parts.length : 0;
+  const drift10 = parts.length ? parts.reduce((a, b) => a + b.avgFwd * b.nEff, 0) / parts.reduce((a, b) => a + b.nEff, 0) : 0;
+  const driftW = parts.length ? nBar / (nBar + 25) : 0;
+
+  return { bias: Math.round(bias), label, confidence, zCombined: zc, comps, conflict, drift10, driftW, techAudit: ctx.techAudit, macroAudit: ctx.macroAudit };
+}
+
+// ---------------- Volatilidade ----------------
 function volView(ctx, chain) {
   const { ta } = ctx;
   const exp = pickExpiry(chain, 25, 60, 40);
@@ -46,14 +89,15 @@ function volView(ctx, chain) {
     const atm = exp.options.filter((o) => o.iv).sort((a, b) => Math.abs(a.strike - ctx.S) - Math.abs(b.strike - ctx.S)).slice(0, 4);
     if (atm.length) atmIv = atm.reduce((a, o) => a + o.iv, 0) / atm.length;
   }
-  // Referência de vol. realizada: previsão EWMA (reage rápido) quando disponível, senão VH20.
-  const hv = ta.ewma || ta.hv20, hvPct = ta.hvPct;
-  const ratio = atmIv && hv ? atmIv / hv : null;
+  const fc = physVol(ta, exp ? exp.dte : 40);
+  const ratio = atmIv && fc ? atmIv / fc : null;
   const ivRank = ctx.ivHistory ? ctx.ivHistory.rank : null;
+  const ivReal = Boolean(ctx.ivReal);
   let label = 'justa';
-  if ((ratio && ratio > 1.25) || (ivRank != null && ivRank > 65)) label = 'cara';
-  else if (ratio && ratio < 0.95 && (hvPct == null || hvPct < 55) && (ivRank == null || ivRank < 40)) label = 'barata';
-  return { atmIv, hv20: ta.hv20, ewma: ta.ewma, hv60: ta.hv60, hvPct, ratio, ivRank, label, expiry: exp ? exp.date : null, theoretical: !chain.real };
+  if (!ivReal) label = 'estimada';
+  else if ((ratio && ratio > 1.2) || (ivRank != null && ivRank > 70)) label = 'cara';
+  else if (ratio && ratio < 0.85 && (ivRank == null || ivRank < 40)) label = 'barata';
+  return { atmIv, forecast: fc, hv20: ta.hv20, ewma: ta.ewma, hv252: ta.hv252, hvPct: ta.hvPct, ratio, ivRank, ivReal, label, expiry: exp ? exp.date : null, theoretical: !chain.real };
 }
 
 // ---------------- Seleção na grade ----------------
@@ -62,81 +106,77 @@ function pickExpiry(chain, min, max, prefer) {
   if (!xs.length) return null;
   return xs.sort((a, b) => Math.abs(a.dte - prefer) - Math.abs(b.dte - prefer))[0];
 }
-
 function byDelta(exp, type, target, filter = () => true) {
   const xs = exp.options.filter((o) => o.type === type && o.mid > 0 && o.delta != null && filter(o));
   if (!xs.length) return null;
   return xs.sort((a, b) => Math.abs(Math.abs(a.delta) - target) - Math.abs(Math.abs(b.delta) - target))[0];
 }
-
 function byStrike(exp, type, K) {
   const xs = exp.options.filter((o) => o.type === type && o.mid > 0);
   if (!xs.length) return null;
   return xs.sort((a, b) => Math.abs(a.strike - K) - Math.abs(b.strike - K))[0];
 }
+const leg = (o, side) => ({ ...o, side });
 
-const leg = (o, side) => ({ ...o, side }); // side: +1 compra, -1 venda
-
-// ---------------- Construtores de estratégias ----------------
-function buildCandidates(ctx, chain, dir) {
+// ---------------- Candidatas (menu completo) ----------------
+function buildCandidates(ctx, chain) {
   const S = ctx.S;
   const out = [];
-  const bull = dir.bias > 0;
-  const t = bull ? 'call' : 'put';
-  const width = (exp) => Math.max(ctx.strikeStep, Math.round((S * 0.04) / ctx.strikeStep) * ctx.strikeStep);
-
-  if (Math.abs(dir.bias) >= 10) {
-    const e1 = pickExpiry(chain, 28, 75, 45);
+  // Largura das travas: ~4% do preço, estreitada para caber no risco máximo por operação
+  // (ativos caros/EUA: 1 contrato de trava larga pode passar do limite).
+  const fx = ctx.market === 'US' ? ctx.usdbrl || 5.5 : 1;
+  const budgetPerShare = (ctx.capital * ctx.maxRiskPct) / 100 / (100 * fx);
+  const width = () => {
+    const step = ctx.strikeStep;
+    const ideal = Math.round((S * 0.04) / step) * step;
+    const fit = Math.floor((2 * budgetPerShare) / step) * step;
+    return Math.max(step, Math.min(ideal, fit || step));
+  };
+  const e1 = pickExpiry(chain, 28, 75, 45);
+  const e2 = pickExpiry(chain, 21, 50, 35);
+  const front = pickExpiry(chain, 18, 40, 28);
+  const back = pickExpiry(chain, 55, 120, 75);
+  for (const intent of [1, -1]) {
+    const bull = intent > 0;
+    const t = bull ? 'call' : 'put';
     if (e1) {
       const o = byDelta(e1, t, 0.45);
-      if (o) out.push({ key: `long_${t}`, name: bull ? 'Compra de call' : 'Compra de put', family: 'direcional-debito', legs: [leg(o, 1)] });
+      if (o) out.push({ key: `long_${t}`, intent, name: bull ? 'Compra de call' : 'Compra de put', family: 'direcional-debito', legs: [leg(o, 1)] });
       const l = byDelta(e1, t, 0.5);
       if (l) {
-        const sK = bull ? l.strike + width(e1) : l.strike - width(e1);
-        const s = byStrike(e1, t, sK);
-        if (s && s.strike !== l.strike) out.push({ key: `debit_${t}`, name: bull ? 'Trava de alta com calls (débito)' : 'Trava de baixa com puts (débito)', family: 'trava-debito', legs: [leg(l, 1), leg(s, -1)] });
+        const s = byStrike(e1, t, bull ? l.strike + width() : l.strike - width());
+        if (s && s.strike !== l.strike) out.push({ key: `debit_${t}`, intent, name: bull ? 'Trava de alta com calls (débito)' : 'Trava de baixa com puts (débito)', family: 'trava-debito', legs: [leg(l, 1), leg(s, -1)] });
       }
     }
-    const e2 = pickExpiry(chain, 21, 50, 35);
     if (e2) {
       const ct = bull ? 'put' : 'call';
       const s = byDelta(e2, ct, 0.28);
       if (s) {
-        const lK = bull ? s.strike - width(e2) : s.strike + width(e2);
-        const l = byStrike(e2, ct, lK);
-        if (l && l.strike !== s.strike) out.push({ key: `credit_${ct}`, name: bull ? 'Trava de alta com puts (crédito)' : 'Trava de baixa com calls (crédito)', family: 'trava-credito', legs: [leg(s, -1), leg(l, 1)] });
-        if (bull) out.push({ key: 'short_put', name: 'Venda de put coberta por caixa', family: 'venda-coberta', legs: [leg(s, -1)] });
-      }
-      if (!bull) {
-        const sc = byDelta(e2, 'call', 0.28);
-        if (sc) out.push({ key: 'short_call', name: 'Venda de call a seco', family: 'venda-descoberta', legs: [leg(sc, -1)] });
+        const l = byStrike(e2, ct, bull ? s.strike - width() : s.strike + width());
+        if (l && l.strike !== s.strike) out.push({ key: `credit_${ct}`, intent, name: bull ? 'Trava de alta com puts (crédito)' : 'Trava de baixa com calls (crédito)', family: 'trava-credito', legs: [leg(s, -1), leg(l, 1)] });
+        if (bull) out.push({ key: 'short_put', intent, name: 'Venda de put coberta por caixa', family: 'venda-coberta', legs: [leg(s, -1)] });
       }
     }
-    const front = pickExpiry(chain, 18, 40, 28);
-    const back = pickExpiry(chain, 55, 120, 75);
     if (front && back && back.date !== front.date) {
       const l = byDelta(back, t, 0.6);
       const s = l && byDelta(front, t, 0.3, (o) => (bull ? o.strike > l.strike : o.strike < l.strike));
-      if (l && s) out.push({ key: `diag_${t}`, name: bull ? 'Diagonal de alta com calls' : 'Diagonal de baixa com puts', family: 'diagonal', legs: [leg(l, 1), leg(s, -1)] });
+      if (l && s) out.push({ key: `diag_${t}`, intent, name: bull ? 'Diagonal de alta com calls' : 'Diagonal de baixa com puts', family: 'diagonal', legs: [leg(l, 1), leg(s, -1)] });
     }
   }
-  if (Math.abs(dir.bias) < 25) {
-    const e = pickExpiry(chain, 25, 55, 38);
-    if (e) {
-      const sp = byDelta(e, 'put', 0.18), sc = byDelta(e, 'call', 0.18);
-      if (sp && sc) {
-        const lp = byStrike(e, 'put', sp.strike - width(e)), lc = byStrike(e, 'call', sc.strike + width(e));
-        if (lp && lc && lp.strike < sp.strike && lc.strike > sc.strike) out.push({ key: 'condor', name: 'Iron condor (venda de volatilidade com risco definido)', family: 'neutra-credito', legs: [leg(lp, 1), leg(sp, -1), leg(sc, -1), leg(lc, 1)] });
-      }
-      const ac = byDelta(e, 'call', 0.5), ap = byDelta(e, 'put', 0.5);
-      if (ac && ap) out.push({ key: 'straddle', name: 'Compra de straddle (aposta em movimento forte)', family: 'neutra-debito', legs: [leg(ac, 1), leg(ap, 1)] });
+  const e = pickExpiry(chain, 25, 55, 38);
+  if (e) {
+    const sp = byDelta(e, 'put', 0.18), sc = byDelta(e, 'call', 0.18);
+    if (sp && sc) {
+      const lp = byStrike(e, 'put', sp.strike - width()), lc = byStrike(e, 'call', sc.strike + width());
+      if (lp && lc && lp.strike < sp.strike && lc.strike > sc.strike) out.push({ key: 'condor', intent: 0, name: 'Iron condor (venda de volatilidade, risco definido)', family: 'neutra-credito', legs: [leg(lp, 1), leg(sp, -1), leg(sc, -1), leg(lc, 1)] });
     }
-    const front = pickExpiry(chain, 18, 40, 28), back = pickExpiry(chain, 50, 120, 70);
-    if (front && back && front.date !== back.date) {
-      const s = byDelta(front, 'call', 0.5);
-      const l = s && byStrike(back, 'call', s.strike);
-      if (s && l) out.push({ key: 'calendar', name: 'Calendário com calls (ATM)', family: 'calendario', legs: [leg(l, 1), leg(s, -1)] });
-    }
+    const ac = byDelta(e, 'call', 0.5), ap = byDelta(e, 'put', 0.5);
+    if (ac && ap) out.push({ key: 'straddle', intent: 0, name: 'Compra de straddle (aposta em movimento forte)', family: 'neutra-debito', legs: [leg(ac, 1), leg(ap, 1)] });
+  }
+  if (front && back && front.date !== back.date) {
+    const s = byDelta(front, 'call', 0.5);
+    const l = s && byStrike(back, 'call', s.strike);
+    if (s && l) out.push({ key: 'calendar', intent: 0, name: 'Calendário com calls (ATM)', family: 'calendario', legs: [leg(l, 1), leg(s, -1)] });
   }
   return out;
 }
@@ -144,7 +184,7 @@ function buildCandidates(ctx, chain, dir) {
 // ---------------- Métricas ----------------
 function analyzeCandidate(c, ctx, dir, vol) {
   const S = ctx.S;
-  const lot = ctx.market === 'US' ? 100 : 100; // contrato EUA = 100 ações; lote padrão B3 = 100 opções
+  const lot = 100; // contrato EUA = 100 ações; lote padrão B3 = 100 opções
   const horizon = Math.min(...c.legs.map((l) => l.dte));
   const cost = c.legs.reduce((a, l) => a + l.side * l.mid, 0); // >0 = débito
   const valueAt = (ST, daysFwd) =>
@@ -162,32 +202,35 @@ function analyzeCandidate(c, ctx, dir, vol) {
     grid.push({ s, exp: pnlAt(s, horizon), now: pnlAt(s, 0) });
   }
   let maxP = Math.max(...grid.map((g) => g.exp)), maxL = Math.min(...grid.map((g) => g.exp));
-  // Risco ilimitado / grande: inclinação nas bordas
-  const slopeHi = grid[N].exp - grid[N - 1].exp, slopeLo = grid[1].exp - grid[0].exp;
-  const unlimitedLoss = slopeHi < -1e-6 && c.legs.some((l) => l.type === 'call' && l.side < 0) && c.legs.filter((l) => l.type === 'call').reduce((a, l) => a + l.side, 0) < 0;
-  const unlimitedGain = slopeHi > 1e-6 && c.legs.filter((l) => l.type === 'call').reduce((a, l) => a + l.side, 0) > 0;
-  if (c.key === 'short_put') maxL = Math.min(maxL, pnlAt(0.0001, horizon)); // até zero
+  const callNet = c.legs.filter((l) => l.type === 'call').reduce((a, l) => a + l.side, 0);
+  const unlimitedLoss = callNet < 0;
+  const unlimitedGain = callNet > 0 && grid[N].exp - grid[N - 1].exp > 1e-6;
+  if (c.key === 'short_put') maxL = Math.min(maxL, pnlAt(0.0001, horizon));
   const bes = [];
   for (let i = 1; i <= N; i++) if (Math.sign(grid[i].exp) !== Math.sign(grid[i - 1].exp) && grid[i - 1].exp !== 0) bes.push(+(grid[i - 1].s + ((grid[i].s - grid[i - 1].s) * -grid[i - 1].exp) / (grid[i].exp - grid[i - 1].exp)).toFixed(2));
 
-  const sigma = vol.atmIv || ctx.ivFallback;
+  const sigmaMkt = vol.atmIv || ctx.ivFallback;
   const T = horizon / 365;
-  const rn = bs.lognormalGrid(S, T, sigma, ctx.r - ctx.q);
+  // Medida de mercado (risco-neutra, VI)
+  const rn = bs.lognormalGrid(S, T, sigmaMkt, ctx.r - ctx.q);
   const pop = rn.reduce((a, p) => a + (pnlAt(p.s, horizon) > 0 ? p.w : 0), 0);
-  // Cenário do sistema: deslocamento da média = retorno histórico médio da faixa atual do sinal
-  // neste ativo, escalado ao prazo e encolhido para zero conforme a amostra (bayesiano).
-  // Sem auditoria conclusiva => cenário neutro (risco-neutro). Limitado a ±0,5 desvio.
-  let tilt = 0;
-  const bk = ctx.calib && ctx.calib.bucket;
-  if (bk && bk.n >= 25 && Number.isFinite(bk.avgFwd)) {
-    const shrink = bk.nEff / (bk.nEff + 30);
-    const tradingDays = horizon * 252 / 365;
-    tilt = Math.log(1 + (bk.avgFwd / 100) * (tradingDays / (ctx.calibHorizon || 10))) * shrink;
-    tilt = clamp(tilt, -0.5 * sigma * Math.sqrt(T), 0.5 * sigma * Math.sqrt(T));
-  }
-  const sys = bs.lognormalGrid(S * Math.exp(tilt), T, sigma, ctx.r - ctx.q);
-  const evSys = sys.reduce((a, p) => a + pnlAt(p.s, horizon) * p.w, 0);
-  const popSys = sys.reduce((a, p) => a + (pnlAt(p.s, horizon) > 0 ? p.w : 0), 0);
+  // Medida "real": vol. prevista (se VI real) + drift calibrado
+  const sigmaPhys = vol.ivReal && vol.forecast ? physVol(ctx.ta, horizon) || sigmaMkt : sigmaMkt;
+  // Média do log-preço no horizonte: w × histórico calibrado + (1−w) × forward risco-neutro.
+  const tradingDays = (horizon * 252) / 365;
+  const histLog = Math.log(1 + (dir.drift10 / 100) * (tradingDays / (ctx.calibHorizon || 10)));
+  const rnLog = (ctx.r - ctx.q) * T;
+  let tilt = dir.driftW * histLog + (1 - dir.driftW) * rnLog;
+  tilt = clamp(tilt, rnLog - 0.5 * sigmaPhys * Math.sqrt(T), rnLog + 0.5 * sigmaPhys * Math.sqrt(T));
+  const ph = bs.lognormalGrid(S * Math.exp(tilt), T, sigmaPhys, 0);
+  const evPhys = ph.reduce((a, p) => a + pnlAt(p.s, horizon) * p.w, 0);
+  const sdPhys = Math.sqrt(ph.reduce((a, p) => a + (pnlAt(p.s, horizon) - evPhys) ** 2 * p.w, 0));
+  const sharpe = sdPhys > 0 ? evPhys / sdPhys : 0; // ganho esperado por unidade de incerteza
+  const popPhys = ph.reduce((a, p) => a + (pnlAt(p.s, horizon) > 0 ? p.w : 0), 0);
+  // Pior cenário plausível: percentil 5% da distribuição real
+  const sorted = ph.map((p) => ({ v: pnlAt(p.s, horizon), w: p.w })).sort((a, b) => a.v - b.v);
+  let acc = 0, var5 = sorted[0].v;
+  for (const x of sorted) { acc += x.w; if (acc >= 0.05) { var5 = x.v; break; } }
 
   const g = c.legs.reduce((a, l) => ({
     delta: a.delta + l.side * (l.delta || 0),
@@ -196,47 +239,28 @@ function analyzeCandidate(c, ctx, dir, vol) {
     vega: a.vega + l.side * (l.vega || 0),
   }), { delta: 0, gamma: 0, theta: 0, vega: 0 });
 
-  const expMove = S * sigma * Math.sqrt(T);
+  const expMove = S * sigmaMkt * Math.sqrt(T);
   const nearestBe = bes.length ? bes.reduce((a, b) => (Math.abs(b - S) < Math.abs(a - S) ? b : a)) : null;
   const beMove = nearestBe ? Math.abs(nearestBe - S) : null;
   const maxLossAbs = unlimitedLoss ? Infinity : Math.abs(Math.min(0, maxL));
   const rr = maxLossAbs && Number.isFinite(maxLossAbs) && maxLossAbs > 0 ? maxP / maxLossAbs : null;
+  const ror = Number.isFinite(maxLossAbs) && maxLossAbs > 0 ? evPhys / maxLossAbs : -Infinity;
   const widthCredit = c.family === 'trava-credito' ? Math.abs(c.legs[0].strike - c.legs[1].strike) : null;
 
-  // Dimensionamento
   const fx = ctx.market === 'US' ? ctx.usdbrl || 5.5 : 1;
   const maxRiskBRL = (ctx.capital * ctx.maxRiskPct) / 100;
   let riskPerLot = maxLossAbs * lot * fx;
-  if (c.key === 'short_put') riskPerLot = c.legs[0].strike * lot * fx; // caixa necessário
+  if (c.key === 'short_put') riskPerLot = c.legs[0].strike * lot * fx;
   const lots = Number.isFinite(riskPerLot) && riskPerLot > 0 ? Math.floor((c.key === 'short_put' ? ctx.capital * 0.25 : maxRiskBRL) / riskPerLot) : 0;
-
   const payoff = grid.filter((_, i) => i % 3 === 0).map((p) => ({ s: +p.s.toFixed(2), exp: +(p.exp * lot).toFixed(2), now: +(p.now * lot).toFixed(2) }));
 
   return {
-    ...c,
-    horizon: Math.round(horizon),
-    cost,
-    debit: cost > 0,
-    maxProfit: unlimitedGain ? Infinity : maxP,
-    maxLoss: unlimitedLoss ? -Infinity : maxL,
-    unlimitedLoss,
-    unlimitedGain,
-    breakevens: bes,
-    pop,
-    popSys,
-    evSys,
-    rr,
-    widthCredit,
-    greeks: g,
-    expMove,
-    beMove,
-    beVsExpMove: beMove != null && expMove ? beMove / expMove : null,
-    lot,
-    fx,
-    riskPerLot,
-    lots,
-    maxRiskBRL,
-    payoff,
+    ...c, horizon: Math.round(horizon), cost, debit: cost > 0,
+    maxProfit: unlimitedGain ? Infinity : maxP, maxLoss: unlimitedLoss ? -Infinity : maxL,
+    unlimitedLoss, unlimitedGain, breakevens: bes,
+    pop, popPhys, evPhys, sdPhys, sharpe, ror, var5, sigmaPhys, tilt,
+    rr, widthCredit, greeks: g, expMove, beMove, beVsExpMove: beMove != null && expMove ? beMove / expMove : null,
+    lot, fx, riskPerLot, lots, maxRiskBRL, payoff,
   };
 }
 
@@ -244,63 +268,54 @@ function analyzeCandidate(c, ctx, dir, vol) {
 function scoreCandidate(a, dir, vol, ctx) {
   let s = 50;
   const why = [];
-  const add = (v, msg) => { s += v; why.push({ v, msg }); };
+  const add = (v, msg) => { if (v) { s += v; why.push({ v: Math.round(v), msg }); } };
+  const pct = (x) => `${(x * 100).toFixed(1)}%`;
+
+  // 1) Vantagem matemática: expectativa calibrada em relação ao risco máximo
+  add(clamp(a.sharpe * 90, -25, 25), `ganho esperado ${a.evPhys >= 0 ? 'positivo' : 'negativo'} ajustado à dispersão (índice ${a.sharpe.toFixed(2)}; ${a.ror >= 0 ? '+' : ''}${Number.isFinite(a.ror) ? pct(a.ror) : '—'} do risco máximo)`);
+
+  // 2) Aderência ao viés
   const conf = dir.confidence;
-  const directional = !['neutra-credito', 'neutra-debito', 'calendario'].includes(a.family);
+  if (a.intent !== 0) {
+    if (Math.abs(dir.bias) >= 12) {
+      if (a.intent === Math.sign(dir.bias)) add(8 * Math.min(1, conf / 50 + 0.3), `alinhada ao viés ${dir.label}`);
+      else add(-12, `contra o viés ${dir.label}`);
+    } else add(-6, 'sem direção clara para estrutura direcional');
+  } else if (Math.abs(dir.bias) < 15) add(6, 'cenário sem direção favorece estrutura neutra');
+  else add(-4, 'há viés direcional; estrutura neutra não o aproveita');
 
-  if (directional) {
-    if (Math.abs(dir.bias) < 15) add(-15, 'cenário sem direção clara para estrutura direcional');
-    if (conf >= 65) {
-      if (a.family === 'direcional-debito') add(12, 'convicção alta favorece exposição direcional plena');
-      if (a.family === 'trava-debito') add(8, 'trava captura o movimento com custo menor');
-      if (a.family === 'trava-credito' || a.family === 'diagonal') add(4, 'estrutura alinhada ao viés');
-    } else {
-      if (a.family === 'trava-debito') add(10, 'convicção moderada: trava limita custo e risco');
-      if (a.family === 'trava-credito') add(10, 'convicção moderada: crédito ganha com tempo e com o ativo parado ou a favor');
-      if (a.family === 'diagonal') add(8, 'diagonal: viés moderado com financiamento pela série curta');
-      if (a.family === 'direcional-debito') add(-4, 'compra seca exige movimento forte e rápido');
-    }
-  } else {
-    if (Math.abs(dir.bias) < 15) add(10, 'cenário neutro favorece estruturas sem direção');
-    else add(-10, 'há viés direcional; estrutura neutra desperdiça a leitura');
-  }
-
+  // 3) Volatilidade (só com VI real)
   const vegaSign = Math.sign(a.greeks.vega);
-  if (vol.label === 'cara') vegaSign < 0 ? add(12, 'VI cara: estrutura vendida em volatilidade') : add(-12, 'VI cara: comprar volatilidade cara reduz a vantagem');
-  if (vol.label === 'barata') vegaSign > 0 ? add(12, 'VI barata: estrutura comprada em volatilidade') : add(-10, 'VI barata: vender volatilidade barata paga pouco pelo risco');
-  if (a.greeks.theta > 0 && vol.label !== 'barata') add(4, 'theta positivo: o tempo trabalha a favor');
-  if (vol.ratio != null && vol.ratio < 0.8 && vegaSign < 0) add(-10, `VI ${(vol.ratio * 100).toFixed(0)}% da vol. realizada: vender prêmio paga menos que o movimento atual`);
-  if (vol.ratio != null && vol.ratio < 0.8 && vegaSign > 0) add(5, 'VI abaixo da vol. realizada: opção barata frente ao movimento atual');
-  const ext = stretch(ctx);
-  if (ext && directional && Math.sign(dir.bias) === ext.dir) {
-    if (a.family === 'direcional-debito') add(-8, `${ext.msg}: compra a seco no fim do movimento tem risco alto de repique`);
-    if (a.family === 'trava-debito') add(3, `${ext.msg}: trava reduz o custo se houver repique`);
+  if (vol.ivReal) {
+    if (vol.label === 'cara') vegaSign < 0 ? add(10, 'VI cara frente à vol. prevista: vender prêmio') : add(-10, 'VI cara: comprar opção cara');
+    if (vol.label === 'barata') vegaSign > 0 ? add(10, 'VI barata frente à vol. prevista: comprar opção') : add(-10, 'VI barata: vender prêmio paga pouco pelo risco');
   }
+  if (a.greeks.theta > 0 && vol.label !== 'barata') add(3, 'theta positivo: o tempo trabalha a favor');
 
+  // 4) Qualidade da estrutura
   if (!a.debit) {
-    if (a.pop >= 0.65) add(6, `probabilidade de lucro ${(a.pop * 100).toFixed(0)}%`);
-    else if (a.pop < 0.55) add(-10, `probabilidade de lucro baixa para estrutura de crédito (${(a.pop * 100).toFixed(0)}%)`);
-    if (a.widthCredit && -a.cost / a.widthCredit < 0.25) add(-10, 'crédito menor que 25% da largura: risco/retorno ruim');
-  } else if (a.rr != null) {
-    if (a.rr >= 2) add(6, `retorno/risco ${a.rr.toFixed(1)}x`);
-    else if (a.rr < 1.2 && Number.isFinite(a.maxProfit)) add(-10, `retorno/risco baixo (${a.rr.toFixed(1)}x)`);
+    if (a.pop >= 0.65) add(5, `probabilidade de lucro ${(a.pop * 100).toFixed(0)}%`);
+    else if (a.pop < 0.55) add(-8, `probabilidade de lucro baixa para crédito (${(a.pop * 100).toFixed(0)}%)`);
+    if (a.widthCredit && -a.cost / a.widthCredit < 0.25) add(-8, 'crédito menor que 25% da largura');
+  } else if (a.rr != null && Number.isFinite(a.maxProfit)) {
+    if (a.rr >= 2) add(5, `retorno/risco ${a.rr.toFixed(1)}x`);
+    else if (a.rr < 1.2) add(-8, `retorno/risco baixo (${a.rr.toFixed(1)}x)`);
   }
-  if (a.beVsExpMove != null && a.debit) {
-    if (a.beVsExpMove > 1) add(-10, 'ponto de equilíbrio além do movimento esperado pela VI');
-    else if (a.beVsExpMove < 0.5) add(5, 'ponto de equilíbrio próximo: exige pouco movimento');
+  if (a.beVsExpMove != null && a.debit && a.family !== 'neutra-debito') {
+    if (a.beVsExpMove > 1) add(-8, 'equilíbrio além do movimento esperado');
+    else if (a.beVsExpMove < 0.5) add(4, 'equilíbrio próximo');
   }
-  const au = ctx.calib && ctx.calib.status;
-  if (directional && au === 'contrary' && ctx.calib.bucket && Math.sign(a.greeks.delta) === ctx.calib.bucket.dir) add(-14, 'sinal técnico historicamente contrário neste ativo');
-  if (directional && au === 'edge' && ctx.calib.bucket && Math.sign(a.greeks.delta) === ctx.calib.bucket.dir) add(6, 'sinal técnico com vantagem histórica comprovada neste ativo');
-  if (a.evSys > 0) add(4, 'expectativa positiva no cenário do sistema');
-  else add(-4, 'expectativa negativa no cenário do sistema');
-  if (ctx.events && ctx.events.length && !a.debit) add(-5, `${ctx.events.length} evento(s) de alto impacto antes do vencimento (risco de gap)`);
+  const ext = stretch(ctx);
+  if (ext && a.intent === ext.dir) {
+    if (a.family === 'direcional-debito') add(-8, `${ext.msg}: compra a seco no fim do movimento`);
+    if (a.family === 'trava-debito') add(3, `${ext.msg}: trava amortece o repique`);
+  }
+  if (ctx.events && ctx.events.length && !a.debit) add(-4, `${ctx.events.length} evento(s) de alto impacto antes do vencimento`);
   const spreads = a.legs.map((l) => l.spreadPct).filter((x) => x != null);
-  if (spreads.length && Math.max(...spreads) > 10) add(-10, 'spread de compra/venda largo (custo de execução)');
+  if (spreads.length && Math.max(...spreads) > 10) add(-10, 'spread de compra/venda largo');
   return { score: Math.round(clamp(s, 0, 100)), why };
 }
 
-// Movimento esticado: IFR extremo e preço a mais de 2 ATR da MME20 no sentido do viés.
 function stretch(ctx) {
   const t = ctx.ta;
   if (!t || !t.atr || !t.ma || !t.ma.e20 || t.rsi == null) return null;
@@ -310,13 +325,47 @@ function stretch(ctx) {
   return null;
 }
 
+// ---------------- Gatilhos: o que mudaria a decisão ----------------
+function triggers(ctx, dir, vol) {
+  const out = [];
+  const f2 = (x) => (Number.isFinite(x) ? x.toFixed(2) : '—');
+  const ta = ctx.ta;
+  const tc = ctx.techCalib;
+  if (tc && tc.ok) {
+    const cur = dir.techAudit && dir.techAudit.bucket ? dir.techAudit.bucket.id : null;
+    for (const b of tc.buckets) {
+      if (b.id === cur || !(b.n >= 25) || !(b.nEff >= 6) || !Number.isFinite(b.zMean) || Math.abs(b.zMean) < 1) continue;
+      out.push({ kind: 'grafico', text: `Se o gráfico entrar na faixa "${b.label}", o histórico deste ativo favorece ${b.zMean > 0 ? 'ALTA' : 'QUEDA'} (retorno médio ${b.avgFwd >= 0 ? '+' : ''}${b.avgFwd.toFixed(2)}% em ${tc.horizon} pregões; z=${b.zMean.toFixed(1)}).` });
+    }
+  }
+  const mc = ctx.macroCalib;
+  if (mc && mc.ok) {
+    const cur = dir.macroAudit && dir.macroAudit.bucket ? dir.macroAudit.bucket.id : null;
+    for (const b of mc.buckets) {
+      if (b.id === cur || !(b.n >= 25) || !(b.nEff >= 6) || Math.abs(b.zMean) < 1) continue;
+      out.push({ kind: 'macro', text: `Se o regime de mercado virar "${b.label}", o histórico deste ativo favorece ${b.zMean > 0 ? 'ALTA' : 'QUEDA'} (${b.avgFwd >= 0 ? '+' : ''}${b.avgFwd.toFixed(2)}% em ${mc.horizon} pregões; z=${b.zMean.toFixed(1)}).` });
+    }
+  }
+  if (ta && ta.ma) {
+    const s1 = ta.supports[0], r1 = ta.resistances[0];
+    out.push({ kind: 'preco', text: `Níveis que mudam a leitura técnica: fechamento ${ta.price > ta.ma.e20 ? 'abaixo' : 'acima'} da MME20 (${f2(ta.ma.e20)})${s1 ? `, perda do suporte ${f2(s1.price)}` : ''}${r1 ? `, rompimento da resistência ${f2(r1.price)}` : ''}.` });
+  }
+  if (vol.ivReal && vol.forecast) {
+    out.push({ kind: 'vol', text: `VI acima de ${(vol.forecast * 120).toFixed(0)}% (20% sobre a vol. prevista) favorece VENDER prêmio; abaixo de ${(vol.forecast * 85).toFixed(0)}% favorece COMPRAR opções. Hoje: ${(vol.atmIv * 100).toFixed(1)}%.` });
+  } else {
+    out.push({ kind: 'vol', text: 'Com a grade real de opções (Tradier/OpLab) o sistema passa a medir se a opção está cara ou barata — hoje a VI é estimada.' });
+  }
+  const ev = (ctx.eventsAll || []).find((e) => e.impact >= 3 && e.daysAway >= 0);
+  if (ev) out.push({ kind: 'evento', text: `Depois de ${ev.title} (${ev.date.split('-').reverse().join('/')}, em ${ev.daysAway} dia(s)) a volatilidade é reprecificada: reavalie.` });
+  return out.slice(0, 6);
+}
+
 // ---------------- Orquestração ----------------
 function generate(ctx, chain) {
   const dir = directionalView(ctx);
   const vol = volView(ctx, chain);
   const ctxChecks = contextGuards(ctx, dir, vol, chain);
-  const raw = buildCandidates(ctx, chain, dir);
-  const analyzed = raw.map((c) => analyzeCandidate(c, ctx, dir, vol)).map((a) => {
+  const analyzed = buildCandidates(ctx, chain).map((c) => analyzeCandidate(c, ctx, dir, vol)).map((a) => {
     const sc = scoreCandidate(a, dir, vol, ctx);
     const guard = runGuards(a, ctx, dir, vol, chain);
     return { ...a, score: sc.score, scoreWhy: sc.why, guard };
@@ -324,26 +373,93 @@ function generate(ctx, chain) {
   const approved = analyzed.filter((a) => !a.guard.blocked).sort((x, y) => y.score - x.score);
   const rejected = analyzed.filter((a) => a.guard.blocked).sort((x, y) => y.score - x.score);
   const globalBlock = ctxChecks.filter((c) => c.status === 'block');
-  const best = approved[0] || null;
-  let decision = 'OPERAR';
-  const reasons = [];
-  if (globalBlock.length) { decision = 'NÃO OPERAR'; reasons.push(...globalBlock.map((c) => c.detail)); }
-  if (!best) { decision = 'NÃO OPERAR'; reasons.push('Nenhuma estrutura passou pela camada anti-erro.'); }
-  else if (best.score < 58) { decision = 'NÃO OPERAR'; reasons.push(`Melhor estrutura com nota ${best.score}/100 (mínimo exigido: 58).`); }
-  if (dir.confidence < 35 && best && !['neutra-credito', 'calendario'].includes(best.family)) { decision = 'NÃO OPERAR'; reasons.push(`Confiança direcional baixa (${dir.confidence}/100).`); }
-  if (best && !(best.evSys > 0)) {
-    decision = 'NÃO OPERAR';
-    reasons.push(`Expectativa ${best.evSys >= 0 ? 'nula' : 'negativa'} (${best.evSys.toFixed(3)} por opção) no cenário calibrado pelo histórico do ativo: sem vantagem matemática.`);
-  }
-  const aud = dir.audit || {};
-  if (best && aud.status === 'contrary' && aud.bucket && !['neutra-credito', 'neutra-debito', 'calendario'].includes(best.family) && Math.sign(best.greeks.delta) === aud.bucket.dir) {
-    decision = 'NÃO OPERAR';
-    reasons.push(`O sinal técnico que sustenta a operação historicamente REVERTEU neste ativo (acerto ${(aud.bucket.hit * 100).toFixed(0)}% vs taxa-base ${(aud.bucket.base * 100).toFixed(0)}%).`);
-  }
   const ext = stretch(ctx);
-  if (ext) ctxChecks.push({ id: 'stretch', group: 'Mercado', label: 'Movimento esticado', status: 'warn', detail: `Ativo ${ext.msg}. Prefira entrada escalonada (metade agora, metade num repique) ou trava.` });
-  if (decision === 'OPERAR' && !chain.real) { decision = 'OPERAR — CONFIRMAR NO BOOK'; reasons.push('Preços teóricos: confirme série, prêmio e liquidez reais antes de enviar a ordem.'); }
-  return { dir, vol, contextChecks: ctxChecks, decision, reasons, best, alternatives: approved.slice(1, 4), rejected };
+  if (ext) ctxChecks.push({ id: 'stretch', group: 'Mercado', label: 'Movimento esticado', status: 'warn', detail: `Ativo ${ext.msg}. Prefira entrada escalonada ou trava.` });
+
+  // Melhor = maior nota entre as de ganho esperado POSITIVO; só sem nenhuma positiva usa a maior nota geral.
+  // Vantagem MATERIAL: ganho ≥ 5% do risco e ganho/dispersão ≥ 0,04 (abaixo disso é ruído do modelo).
+  // Estruturas neutras de volatilidade só contam com VI real (sem ela a vantagem não é mensurável).
+  const material = (a) => a.evPhys > 0 && a.ror >= 0.05 && a.sharpe >= 0.04 && (vol.ivReal || a.intent !== 0);
+  const positive = approved.filter(material);
+  const best = positive[0] || approved[0] || null;
+  const notWorth = [];
+  const plain = [];
+  const pct = (x) => `${(x * 100).toFixed(1)}%`;
+  const money = (x) => `R$ ${Math.abs(x).toFixed(0)}`;
+
+  // Leitura em linguagem direta
+  const ta = dir.techAudit, ma = dir.macroAudit;
+  if (ta && ta.bucket && ta.status !== 'unknown') plain.push(`Gráfico: ${ta.short || ta.msg}`);
+  if (ma && ma.bucket && ma.status !== 'unknown') plain.push(`Macro: ${ma.short || ma.msg}`);
+  if (ctx.regime.stress) plain.push(`Mercado em estresse (VIX ${ctx.vix ? ctx.vix.toFixed(0) : '≥30'}): gaps grandes são prováveis — só risco definido.`);
+  if (!vol.ivReal) plain.push('Volatilidade implícita estimada: a vantagem de comprar/vender volatilidade não pode ser medida sem a grade real.');
+  else plain.push(`Opções ${vol.label === 'cara' ? 'CARAS' : vol.label === 'barata' ? 'BARATAS' : 'em preço justo'}: VI ${(vol.atmIv * 100).toFixed(1)}% vs vol. prevista ${(vol.forecast * 100).toFixed(1)}%.`);
+
+  let level, label, role, shown = best, sizeFactor = 1;
+  if (globalBlock.length || !best) {
+    level = 'bloqueado';
+    label = 'NÃO OPERAR';
+    role = null;
+    shown = null;
+    if (globalBlock.length) notWorth.push(...globalBlock.map((c) => c.detail));
+    if (!best) {
+      const sizeOnly = rejected.length && rejected.every((r) => r.guard.checks.some((c) => c.id === 'size' && c.status === 'block'));
+      if (sizeOnly) {
+        const minRisk = Math.min(...rejected.map((r) => r.riskPerLot).filter(Number.isFinite));
+        notWorth.push(`Com capital de R$ ${ctx.capital.toLocaleString('pt-BR')} e risco máximo de ${ctx.maxRiskPct}% (R$ ${(ctx.capital * ctx.maxRiskPct / 100).toFixed(0)}), nem 1 lote cabe: a estrutura mais barata arrisca R$ ${minRisk.toFixed(0)}. Aumente o capital ou o risco por operação para ver a análise.`);
+      } else notWorth.push('Nenhuma estrutura passou pelos filtros de segurança — nem como alternativa.');
+    }
+  } else {
+    const directional = best.intent !== 0;
+    if (!material(best)) notWorth.push(best.evPhys > 0
+      ? `Nenhuma estrutura tem vantagem material: a melhor ganha ${Number.isFinite(best.ror) ? pct(best.ror) : '—'} do risco em média${!vol.ivReal && best.intent === 0 ? ', e é aposta em volatilidade sem VI de mercado para medir' : ' — dentro da margem de erro do modelo'}.`
+      : `Nenhuma estrutura tem ganho esperado positivo pelo comportamento histórico do ativo.`);
+    if (directional && dir.confidence < 30) notWorth.push(`Evidência histórica fraca para a direção (confiança ${dir.confidence}/100).`);
+    if (best.score < 58) notWorth.push(`Melhor nota ${best.score}/100 (mínimo 58).`);
+    if (dir.conflict) notWorth.push('Gráfico e macro apontam, historicamente, para lados opostos.');
+
+    if (!notWorth.length) {
+      const strong = best.score >= 68 && (!directional || dir.confidence >= 40) && !ctx.regime.stress;
+      level = strong ? 'operar' : 'reduzido';
+      label = strong ? 'OPERAR' : 'OPERAR COM TAMANHO REDUZIDO';
+      role = strong ? 'Operação recomendada' : 'Operação recomendada — metade do tamanho';
+      sizeFactor = strong ? 1 : 0.5;
+      if (!strong) {
+        if (ctx.regime.stress) notWorth.push('Regime de estresse: tamanho pela metade.');
+        if (directional && dir.confidence < 40) notWorth.push(`Confiança moderada (${dir.confidence}/100): tamanho pela metade.`);
+        if (best.score < 68) notWorth.push(`Nota ${best.score}/100: vantagem existe, mas é modesta.`);
+      }
+    } else {
+      level = 'nao_vale';
+      // Alternativa: melhor ganho esperado por unidade de incerteza (menor dano), risco definido, sem venda coberta
+      const pool = approved.filter((a) => a.key !== 'short_put' && Number.isFinite(a.ror));
+      const ranked = (pool.length ? pool : approved).slice().sort((x, y) => (y.sharpe - x.sharpe) || (y.score - x.score));
+      // Entre as de ganho/dispersão próximos do melhor (≥ 80%), prefere a de maior probabilidade de lucro.
+      const top = ranked[0].sharpe;
+      const near = top > 0 ? ranked.filter((x) => x.sharpe >= top * 0.8) : [ranked[0]];
+      shown = near.sort((x, y) => y.popPhys - x.popPhys)[0];
+      label = 'NÃO VALE A PENA';
+      role = 'Mas, se quiser operar, o mais indicado é';
+      sizeFactor = 1 / 3;
+    }
+  }
+  if (shown) {
+    shown = { ...shown };
+    shown.lotsFull = shown.lots;
+    shown.lots = shown.lots >= 1 ? Math.max(1, Math.floor(shown.lots * sizeFactor)) : 0;
+    shown.sizeFactor = sizeFactor;
+  }
+  const headline = level === 'nao_vale' ? `NÃO VALE A PENA — MAS, SE QUISER, O MAIS INDICADO É: ${shown.name.toUpperCase()}`
+    : level === 'bloqueado' ? 'NÃO OPERAR — nenhuma estrutura segura disponível'
+    : `${label}: ${shown.name}`;
+  let summary = '';
+  if (shown) {
+    const ev = shown.evPhys * shown.lot * shown.fx;
+    summary = `${shown.name}: ganho esperado ${ev >= 0 ? '+' : '−'}${money(ev)} por lote (${pct(shown.ror)} do risco), probabilidade de lucro ${(shown.popPhys * 100).toFixed(0)}% no cenário calibrado, perda máxima ${money(shown.maxLoss * shown.lot * shown.fx)} por lote.`;
+  }
+  const decision = { level, label, headline, role, summary, needsBookCheck: !chain.real, sizeFactor };
+  const others = approved.filter((a) => !shown || a.key !== shown.key);
+  return { dir, vol, contextChecks: ctxChecks, decision, notWorth, plain, triggers: triggers(ctx, dir, vol), best: shown, alternatives: others.slice(0, 5), rejected };
 }
 
-module.exports = { generate, directionalView, volView };
+module.exports = { generate, directionalView, volView, physVol };

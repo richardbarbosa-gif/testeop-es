@@ -192,6 +192,12 @@ function analyze(candles, { lite = false } = {}) {
 
   const score = Math.max(-100, Math.min(100, parts.reduce((s, p) => s + p.val, 0)));
   if (lite) return { ok: true, score };
+  // ANTI-ERRO: salto > 35% num pregão (últimos 60) = evento corporativo não ajustado ou dado errado.
+  let jump = null;
+  for (let i = Math.max(1, n - 60); i < n; i++) {
+    const rj = candles[i].c / candles[i - 1].c - 1;
+    if (Math.abs(rj) > 0.35 && (!jump || Math.abs(rj) > Math.abs(jump.pct) / 100)) jump = { pct: rj * 100, t: candles[i].t };
+  }
   let trend = 'lateral';
   if (score >= 45) trend = 'alta forte';
   else if (score >= 15) trend = 'alta';
@@ -206,7 +212,7 @@ function analyze(candles, { lite = false } = {}) {
   const lines = [];
   lines.push(`Tendência ${trend} (pontuação técnica ${score > 0 ? '+' : ''}${score.toFixed(0)}). ${st.label[0].toUpperCase() + st.label.slice(1)}.`);
   lines.push(`Médias: MME8 ${L(e8).toFixed(2)} · MME20 ${L(e20).toFixed(2)}${has200 ? ` · MMA200 ${L(s200).toFixed(2)}` : ''}. ${cross ? `Cruzamento de ${cross.type} da MME8 sobre a MME20 há ${cross.barsAgo} pregão(ões).` : ''}`);
-  if (ns || nr) lines.push(`Suporte mais próximo ${ns ? `${ns.price.toFixed(2)} (${pct(ns.price, price).toFixed(1)}%, ${ns.touches} toque(s))` : `nenhum pivô abaixo — preço em região de mínimas (referência: mínima de 52 semanas ${lo52.toFixed(2)})`}; resistência ${nr ? `${nr.price.toFixed(2)} (+${pct(nr.price, price).toFixed(1)}%, ${nr.touches} toque(s))` : '—'}.`);
+  if (ns || nr) lines.push(`Suporte mais próximo: ${ns ? `${ns.price.toFixed(2)} (${pct(ns.price, price).toFixed(1)}%, ${ns.touches} toque(s))` : `nenhum pivô abaixo — preço em região de mínimas (referência: mínima de 52 semanas ${lo52.toFixed(2)})`}; resistência mais próxima: ${nr ? `${nr.price.toFixed(2)} (+${pct(nr.price, price).toFixed(1)}%, ${nr.touches} toque(s))` : '—'}.`);
   lines.push(`Faixa de 52 semanas: ${lo52.toFixed(2)} – ${hi52.toFixed(2)} (preço a ${pct(price, hi52).toFixed(1)}% da máxima). ATR14 ${atrNow.toFixed(2)} (${((atrNow / price) * 100).toFixed(1)}% do preço).`);
   if (rr != null) lines.push(`IFR14 ${rr.toFixed(0)}. Vol. histórica 20d ${(hvNow * 100).toFixed(1)}% (percentil ${hvPct != null ? hvPct.toFixed(0) : '—'} do último ano).`);
 
@@ -223,6 +229,8 @@ function analyze(candles, { lite = false } = {}) {
     hv20: hvNow,
     hv60: L(hv60),
     ewma: ewmaVol(closes.slice(-260)),
+    jump,
+    hv252: closes.length > 253 ? histVol(closes.slice(-253), 252)[252] : null,
     hvPct,
     volRatio,
     hi52, lo52, hi20, lo20,
@@ -266,13 +274,15 @@ function calibrate(candles, { horizon = 10, maxSamples = 1000, minHistory = 220,
   }
   if (samples.length < 120) return { ok: false, reason: 'histórico insuficiente para auditoria', samples: samples.length };
   const baseUp = samples.filter((x) => x.fwd > 0).length / samples.length;
+  const meanAll = samples.reduce((a, x) => a + x.fwd, 0) / samples.length;
+  const sdAll = Math.sqrt(samples.reduce((a, x) => a + (x.fwd - meanAll) ** 2, 0) / (samples.length - 1));
   const out = BUCKETS.map((b) => {
     const xs = samples.filter((x) => x.score > b.min && x.score <= b.max);
     if (!xs.length) return { ...b, n: 0 };
     // Amostras sobrepostas: conta episódios (blocos contíguos) e usa o maior entre episódios e n/h.
-    let episodes = 0;
-    for (let i = 0; i < xs.length; i++) if (i === 0 || xs[i].t - xs[i - 1].t > 1) episodes++;
-    const nEff = Math.max(episodes, xs.length / horizon);
+    // Amostras independentes = janelas que não se sobrepõem (escolha gulosa, espaçamento >= h).
+    let nEff = 0, lastT = -1e9;
+    for (const x of xs) if (x.t - lastT >= horizon) { nEff++; lastT = x.t; }
     const avg = xs.reduce((a, x) => a + x.fwd, 0) / xs.length;
     let hit = null, base = null, z = null;
     if (b.dir !== 0) {
@@ -280,23 +290,26 @@ function calibrate(candles, { horizon = 10, maxSamples = 1000, minHistory = 220,
       base = b.dir > 0 ? baseUp : 1 - baseUp;
       z = (hit - base) / Math.sqrt(Math.max(1e-9, (base * (1 - base)) / nEff));
     }
-    return { ...b, n: xs.length, nEff: +nEff.toFixed(1), hit, base, edge: hit != null ? hit - base : null, z, avgFwd: avg * 100 };
+    // zMean: retorno médio da faixa vs média incondicional (com sinal: + favorece alta).
+    const zMean = (avg - meanAll) / (sdAll / Math.sqrt(nEff));
+    return { ...b, n: xs.length, nEff: +nEff.toFixed(1), hit, base, edge: hit != null ? hit - base : null, z, zMean, avgFwd: avg * 100 };
   });
-  return { ok: true, horizon, samples: samples.length, years: +(samples.length / 252).toFixed(1), baseUp, buckets: out };
+  return { ok: true, horizon, samples: samples.length, years: +(samples.length / 252).toFixed(1), baseUp, meanAll: meanAll * 100, buckets: out };
 }
 
 // Veredito para a pontuação ATUAL, com força da evidência (escore-z unilateral).
 function calibVerdict(calib, score) {
   if (!calib || !calib.ok) return { status: 'unknown', msg: 'Sem auditoria histórica (histórico insuficiente).' };
   const b = calib.buckets.find((x) => x.id === bucketOf(score).id);
-  if (!b || b.dir === 0) return { status: 'neutral', bucket: b, msg: 'Sinal técnico lateral: nada a auditar.' };
-  if (b.n < 25 || b.nEff < 6) return { status: 'unknown', bucket: b, msg: `Faixa "${b.label}" ocorreu ${b.n} vezes (~${Math.round(b.nEff)} episódios) em ${calib.years} anos: amostra insuficiente para concluir.` };
+  if (!b || b.dir === 0) return { status: 'neutral', bucket: b, msg: `Sinal técnico lateral${b && b.n ? ` (média histórica nessa faixa: ${b.avgFwd >= 0 ? '+' : ''}${b.avgFwd.toFixed(2)}% em ${calib.horizon} pregões)` : ''}.`, short: 'gráfico lateral, sem direção definida.' };
+  if (b.n < 25 || b.nEff < 6) return { status: 'unknown', bucket: b, msg: `Faixa "${b.label}" ocorreu ${b.n} vezes (~${Math.round(b.nEff)} janelas independentes) em ${calib.years} anos: amostra insuficiente para concluir.` };
   const pp = (x) => `${(x * 100).toFixed(0)}%`;
   const force = Math.abs(b.z) >= 2 ? 'forte' : Math.abs(b.z) >= 1 ? 'moderada' : 'fraca';
-  const txt = `Em ${calib.years} anos, com pontuação "${b.label}", o ativo ${b.dir > 0 ? 'subiu' : 'caiu'} em ${pp(b.hit)} das janelas de ${calib.horizon} pregões (taxa-base ${pp(b.base)}; retorno médio ${b.avgFwd >= 0 ? '+' : ''}${b.avgFwd.toFixed(2)}%; ${b.n} ocorrências, ~${Math.round(b.nEff)} episódios; z=${b.z.toFixed(2)}, evidência ${force}).`;
-  if (b.edge <= -0.05 && b.z <= -1) return { status: 'contrary', bucket: b, force, msg: `${txt} O sinal funcionou CONTRA neste ativo (tende a reverter).` };
-  if (b.edge >= 0.04 && b.z >= 1) return { status: 'edge', bucket: b, force, msg: `${txt} Vantagem de ${(b.edge * 100).toFixed(0)} p.p. sobre a taxa-base.` };
-  return { status: 'noedge', bucket: b, force, msg: `${txt} Sem vantagem estatisticamente distinguível do acaso.` };
+  const txt = `Em ${calib.years} anos, com pontuação "${b.label}", o ativo ${b.dir > 0 ? 'subiu' : 'caiu'} em ${pp(b.hit)} das janelas de ${calib.horizon} pregões (taxa-base ${pp(b.base)}; retorno médio ${b.avgFwd >= 0 ? '+' : ''}${b.avgFwd.toFixed(2)}%; ${b.n} ocorrências, ~${Math.round(b.nEff)} janelas independentes; z=${b.z.toFixed(2)}, evidência ${force}).`;
+  const mv = `${b.avgFwd >= 0 ? '+' : ''}${b.avgFwd.toFixed(2)}%`;
+  if (b.edge <= -0.05 && b.z <= -1) return { status: 'contrary', bucket: b, force, msg: `${txt} O sinal funcionou CONTRA neste ativo (tende a reverter).`, short: `o sinal "${b.label}" costuma REVERTER neste ativo — depois dele o preço andou em média ${mv} em ${calib.horizon} pregões (${b.dir > 0 ? 'subiu' : 'caiu'} só em ${pp(b.hit)} das vezes).` };
+  if (b.edge >= 0.04 && b.z >= 1) return { status: 'edge', bucket: b, force, msg: `${txt} Vantagem de ${(b.edge * 100).toFixed(0)} p.p. sobre a taxa-base.`, short: `o sinal "${b.label}" FUNCIONOU neste ativo — acerto ${pp(b.hit)} contra ${pp(b.base)} normal (média ${mv} em ${calib.horizon} pregões).` };
+  return { status: 'noedge', bucket: b, force, msg: `${txt} Sem vantagem estatisticamente distinguível do acaso.`, short: `o sinal "${b.label}" NÃO teve vantagem neste ativo — acertou ${pp(b.hit)}, quase o mesmo que o acaso (${pp(b.base)}).` };
 }
 
 // Volatilidade EWMA (RiskMetrics, λ=0.94) anualizada — previsão de curto prazo.

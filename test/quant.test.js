@@ -81,3 +81,25 @@ test('Auditoria não olha o futuro: alterar candles futuros não muda a pontuaç
   const b = ta.analyze(mod.slice(0, 300), { lite: true }).score;
   assert.strictEqual(a, b);
 });
+
+test('Macro calibrado: índice central e entrada na abertura seguinte (sem olhar o futuro)', () => {
+  const mc = require('../src/quant/macrocal');
+  // VIX 36 (-25) subindo 26% (-8), DXY 0, BRL +1,14% (-9,12), 10a -14bps (+8), S&P -3,7% (-10)
+  near(mc.coreScore({ vix: 36, vixChg: 26, dxyChg: 0, brlChg: 1.14, tnxBps: -14, spxChg: -3.7 }), -44.12, 1e-9, 'core');
+  assert.strictEqual(mc.coreScore({ vix: 20 }), null, 'menos de 3 componentes => sem leitura');
+  // série sintética: regime sempre neutro; retorno medido de open(i+1) até close(i+10)
+  const day = 86400;
+  const regime = new Map();
+  const candles = [];
+  for (let i = 0; i < 400; i++) {
+    const d = new Date(Date.UTC(2024, 0, 1) + i * day * 1000).toISOString().slice(0, 10);
+    regime.set(d, 0);
+    candles.push({ t: Date.UTC(2024, 0, 1) / 1000 + i * day, o: 100 + i + 0.5, c: 100 + i, h: 101 + i, l: 99 + i, v: 1 });
+  }
+  const cal = mc.calibrateAsset(regime, { meta: { gmtoffset: 0 }, candles }, 10);
+  const nb = cal.buckets.find((b) => b.id === 'ne');
+  // média esperada: média de (100+i+10)/(100+i+1.5) - 1 — se usasse close(i) seria maior
+  let exp = 0, k = 0;
+  for (let i = 0; i < 400 - 11; i++) { exp += (100 + i + 10) / (100 + i + 1 + 0.5) - 1; k++; }
+  near(nb.avgFwd, (exp / k) * 100, 1e-9, 'entrada na abertura seguinte');
+});

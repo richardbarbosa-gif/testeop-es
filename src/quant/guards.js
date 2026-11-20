@@ -27,20 +27,27 @@ function contextGuards(ctx, dir, vol, chain) {
     out.push(check('sanity-price', 'Dados', 'Consistência do preço do ativo', d > 15 ? 'block' : 'ok',
       d > 15 ? `Cotação diverge ${d.toFixed(1)}% do histórico — possível dado corrompido.` : 'Cotação coerente com o histórico.'));
   }
+  if (ctx.ta && ctx.ta.jump) {
+    const j = ctx.ta.jump;
+    const dt = new Date(j.t * 1000).toISOString().slice(0, 10).split('-').reverse().join('/');
+    if (j.systemic) {
+      out.push(check('jump', 'Dados', 'Crash sistêmico recente', 'warn', `Queda de ${j.pct.toFixed(0)}% em ${dt}, junto com o índice (${j.market.toFixed(1)}%): volatilidade histórica inflada pelo crash; prêmios teóricos ficam mais caros.`));
+    } else {
+      out.push(check('jump', 'Dados', 'Salto de preço suspeito', 'block', `Variação de ${j.pct.toFixed(0)}% em ${dt}${j.market != null ? ` contra ${j.market.toFixed(1)}% do índice` : ''}: salto específico do ativo — possível evento corporativo não ajustado (grupamento, subscrição) ou dado errado. Volatilidade e níveis técnicos contaminados: análise bloqueada.`));
+    }
+  }
   if (ctx.historyLen < 200) out.push(check('history', 'Dados', 'Histórico para MMA200', 'warn', `Apenas ${ctx.historyLen} pregões: MMA200 indisponível ou pouco confiável.`));
   out.push(check('vol-data', 'Dados', 'Volatilidade implícita disponível', vol.atmIv ? 'ok' : 'block', vol.atmIv ? `VI ATM ${(vol.atmIv * 100).toFixed(1)}%${vol.theoretical ? ' (estimada)' : ''}.` : 'Sem VI: impossível precificar com segurança.'));
   if (!chain.real) out.push(check('theoretical', 'Dados', 'Fonte de preços das opções', 'warn',
     `Grade TEÓRICA (${chain.volMethod || 'Black-Scholes'}). Strikes e prêmios são estimativas: confirme série, prêmio e liquidez no book antes de enviar ordem.`));
   if (chain.unvalidated) out.push(check('connector', 'Dados', 'Conector de dados', 'warn', 'Conector OpLab ainda não validado com dados reais: confira os números com a plataforma.'));
 
-  out.push(check('conflict', 'Mercado', 'Técnico x macro', dir.conflict ? 'block' : 'ok',
-    dir.conflict ? `Sinais fortes e opostos: técnico ${ctx.ta.score > 0 ? '+' : ''}${ctx.ta.score} contra macro ${ctx.regime.score > 0 ? '+' : ''}${ctx.regime.score}. Ficar de fora é a decisão profissional.` : 'Sem conflito forte entre gráfico e macro.'));
-  const cv = ctx.calib;
-  if (cv) {
-    // Só alerta aqui: o veto às estruturas direcionais no sentido do sinal fica na decisão (estruturas neutras seguem válidas).
-    const st = cv.status === 'edge' ? 'ok' : 'warn';
-    out.push(check('audit', 'Mercado', 'Auditoria histórica do sinal técnico', cv.status === 'neutral' ? 'ok' : st, cv.msg));
-  }
+  out.push(check('conflict', 'Mercado', 'Gráfico x macro (calibrados)', dir.conflict ? 'warn' : 'ok',
+    dir.conflict ? 'Historicamente, o gráfico e o regime macro atuais apontam para lados opostos neste ativo: estruturas neutras tendem a ser mais adequadas.' : 'Sem conflito estatístico entre gráfico e macro.'));
+  // Auditorias: informam (o efeito já está no viés e no cenário calibrado).
+  const st = (v) => (!v ? 'warn' : ['edge', 'bull', 'bear', 'contrary', 'noedge', 'neutral'].includes(v.status) ? 'ok' : 'warn');
+  if (ctx.techAudit) out.push(check('audit-tech', 'Mercado', 'Auditoria histórica do gráfico', st(ctx.techAudit), ctx.techAudit.msg));
+  if (ctx.macroAudit) out.push(check('audit-macro', 'Mercado', 'Auditoria histórica do macro', st(ctx.macroAudit), ctx.macroAudit.msg));
   if (ctx.regime.stress) out.push(check('stress', 'Mercado', 'Regime de estresse', 'warn', 'VIX ≥ 30 ou VXEWZ ≥ 45: apenas estruturas de risco definido são permitidas; gaps prováveis.'));
   if (ctx.lead && ctx.lead.adrPost && Math.abs(ctx.lead.adrPost) >= 2) out.push(check('gap', 'Mercado', 'Gap esperado na abertura', 'warn', `ADR/EWZ moveu ${ctx.lead.adrPost.toFixed(1)}% no after-market: a abertura deve ter gap; não envie ordem a mercado no leilão.`));
   const soon = (ctx.eventsAll || []).filter((e) => e.daysAway <= 2 && e.impact >= 3);
@@ -66,10 +73,12 @@ function runGuards(a, ctx, dir, vol, chain) {
     c.push(check('calc-width', 'Cálculo', 'Limites da trava respeitam a largura', okW ? 'ok' : 'block', okW ? `Ganho e perda limitados à largura de ${w.toFixed(2)}.` : 'Ganho/perda excede a largura da trava — erro de dado.'));
     if (isDebit && a.cost >= w) c.push(check('arb', 'Cálculo', 'Débito menor que a largura', 'block', 'Débito ≥ largura: operação sem possibilidade de lucro.'));
   }
-  const directional = !['neutra-credito', 'neutra-debito', 'calendario'].includes(fam);
-  if (directional && Math.abs(dir.bias) >= 10) {
-    const okSign = Math.sign(a.greeks.delta) === Math.sign(dir.bias);
-    c.push(check('calc-delta', 'Cálculo', 'Delta da posição alinhado ao viés', okSign ? 'ok' : 'block', okSign ? `Delta líquido ${a.greeks.delta.toFixed(2)} no sentido do viés ${dir.label}.` : 'Delta da estrutura contra o viés — montagem incoerente.'));
+  if (a.intent) {
+    const okSign = Math.sign(a.greeks.delta) === a.intent;
+    c.push(check('calc-delta', 'Cálculo', 'Delta coerente com a montagem', okSign ? 'ok' : 'block', okSign ? `Delta líquido ${a.greeks.delta.toFixed(2)} no sentido da estrutura (${a.intent > 0 ? 'alta' : 'baixa'}).` : 'Delta da estrutura contrário à sua finalidade — montagem incoerente, descartada.'));
+  }
+  for (const l of a.legs) {
+    if (l.iv != null && (l.iv < 0.03 || l.iv > 1.5)) c.push(check(`ivp-${l.strike}-${l.type}`, 'Dados', 'VI plausível', 'block', `Perna ${l.type.toUpperCase()} ${l.strike}: VI ${(l.iv * 100).toFixed(0)}% fora da faixa plausível (3–150%).`));
   }
   if (chain.real) {
     for (const l of a.legs) {
@@ -78,7 +87,6 @@ function runGuards(a, ctx, dir, vol, chain) {
       if (l.type === 'put' || ctx.market === 'US') {
         if (l.mid < intrinsic * 0.97 - 0.02) c.push(check(`intr-${l.symbol}`, 'Dados', 'Prêmio ≥ valor intrínseco', 'block', `${l.symbol}: prêmio abaixo do intrínseco — cotação defasada ou errada.`));
       }
-      if (l.iv != null && (l.iv < 0.03 || l.iv > 2.5)) c.push(check(`iv-${l.symbol}`, 'Dados', 'VI plausível', 'block', `${l.symbol}: VI ${(l.iv * 100).toFixed(0)}% fora da faixa plausível.`));
       if (l.providerDelta != null && l.delta != null && Math.abs(l.providerDelta - l.delta) > 0.15) c.push(check(`dlt-${l.symbol}`, 'Dados', 'Delta confere com o fornecedor', 'warn', `${l.symbol}: delta próprio ${l.delta.toFixed(2)} x fornecedor ${l.providerDelta.toFixed(2)}.`));
     }
   }
@@ -117,8 +125,9 @@ function runGuards(a, ctx, dir, vol, chain) {
     const burn = l.theta && l.mid ? Math.abs(l.theta) / l.mid * 100 : null;
     if (burn != null) c.push(check('theta-burn', 'Risco', 'Perda diária por theta', burn > 2.5 ? 'warn' : 'ok', `Theta consome ${burn.toFixed(2)}% do prêmio por dia.`));
   }
-  c.push(check('ev', 'Risco', 'Expectativa no cenário calibrado', a.evSys > 0 ? 'ok' : 'warn',
-    `Valor esperado ${a.evSys >= 0 ? '+' : ''}${(a.evSys * a.lot).toFixed(2)} por lote (média do resultado pela distribuição calibrada no histórico do ativo).`));
+  c.push(check('ev', 'Risco', 'Ganho esperado (cenário calibrado)', a.evPhys > 0 ? 'ok' : 'warn',
+    `${a.evPhys >= 0 ? '+' : '−'}${Math.abs(a.evPhys * a.lot * a.fx).toFixed(2)} por lote (${(a.ror * 100).toFixed(1)}% do risco), com vol. ${vol.ivReal ? 'prevista' : 'implícita'} e drift histórico do ativo.`));
+  if (Number.isFinite(a.var5)) c.push(check('var5', 'Risco', 'Pior cenário plausível (5%)', 'ok', `Em 1 de cada 20 cenários o resultado fica abaixo de ${a.var5 >= 0 ? '+' : '−'}${Math.abs(a.var5 * a.lot * a.fx).toFixed(0)} por lote.`));
   if (ctx.events && ctx.events.length) c.push(check('events', 'Risco', 'Eventos antes do vencimento', 'warn', ctx.events.map((e) => `${e.title} ${e.date}`).join('; ')));
   if (ctx.market === 'B3' && a.legs.some((l) => l.type === 'call' && l.side < 0) && ctx.q > 0.04) c.push(check('div', 'Risco', 'Dividendos x call vendida', 'warn', `Dividend yield estimado ${(ctx.q * 100).toFixed(1)}%: call vendida (americana) pode ser exercida antes da data-com. Confirme a agenda de proventos.`));
   if (ctx.regime.stress && !isDebit) c.push(check('stress-credit', 'Risco', 'Crédito em estresse', 'warn', 'Venda de prêmio em estresse: prêmios gordos, mas gaps podem levar à perda máxima rapidamente.'));

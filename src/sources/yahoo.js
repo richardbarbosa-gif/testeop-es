@@ -26,7 +26,7 @@ function toCandles(r) {
 
 // Histórico diário (2 anos => MMA200 confiável).
 function history(symbol, range = '2y', interval = '1d') {
-  const ttl = interval === '1d' ? 10 * 60e3 : 2 * 60e3;
+  const ttl = range === '5y' ? 6 * 3600e3 : interval === '1d' ? 10 * 60e3 : 2 * 60e3; // 5 anos: só para calibração
   return cached(`yh:${symbol}:${range}:${interval}`, ttl, async () => {
     const r = await rawChart(symbol, range, interval);
     const candles = toCandles(r);
@@ -40,6 +40,7 @@ function slimMeta(m) {
     currency: m.currency,
     exchange: m.exchangeName,
     tz: m.exchangeTimezoneName,
+    gmtoffset: m.gmtoffset,
     price: m.regularMarketPrice,
     time: m.regularMarketTime,
     dayHigh: m.regularMarketDayHigh,

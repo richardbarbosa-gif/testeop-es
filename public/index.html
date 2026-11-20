@@ -16,6 +16,7 @@
     <strong class="logo">Radar<span>·</span>Opções</strong>
     <nav class="tabs" role="tablist" aria-label="Seções">
       <button role="tab" class="tab" data-tab="overview" aria-selected="true">Visão geral</button>
+      <button role="tab" class="tab" data-tab="scanner" aria-selected="false">Oportunidades</button>
       <button role="tab" class="tab" data-tab="analysis" aria-selected="false">Análise &amp; Operação</button>
       <button role="tab" class="tab" data-tab="journal" aria-selected="false">Diário</button>
     </nav>
@@ -48,6 +49,7 @@
         </div>
         <div class="stress" id="regStress" hidden>⚠ Regime de estresse — só estruturas de risco definido</div>
         <ul class="comps" id="regComps"></ul>
+        <p class="dim small" id="regCore" style="margin:12px 0 0"></p>
       </article>
 
       <article class="card">
@@ -84,9 +86,44 @@
     </article>
   </section>
 
+  <!-- ================= OPORTUNIDADES ================= -->
+  <section class="view" id="view-scanner" hidden>
+    <article class="card">
+      <header class="card-h">
+        <div><h2>Oportunidades — todos os ativos</h2><p class="dim small" style="margin:4px 0 0">O motor completo (macro e gráfico calibrados, volatilidade, gregas e camada anti-erro) rodado em cada ativo. Clique em uma linha para abrir a análise.</p></div>
+        <div class="scan-ctl"><span class="dim small" id="scanStatus">—</span><button class="btn btn-sm" id="scanRefresh">Atualizar agora</button></div>
+      </header>
+      <div class="scan-kpis" id="scanKpis"></div>
+      <div class="scan-filters">
+        <div class="seg" id="scanLevels" role="group" aria-label="Filtrar por decisão"></div>
+        <select class="input sel" id="scanGroup" aria-label="Filtrar por setor"><option value="">Todos os setores</option></select>
+        <input class="input" id="scanSearch" placeholder="Filtrar por ativo" aria-label="Filtrar por ativo">
+      </div>
+      <div class="tbl-scroll">
+        <table class="tbl scan" id="scanTbl">
+          <thead><tr>
+            <th data-k="ticker">Ativo</th><th class="r" data-k="chg">Preço · dia</th>
+            <th data-k="techScore">Gráfico</th><th data-k="macroStatus">Macro</th><th data-k="volLabel">Opções</th><th class="r" data-k="bias">Viés · conf.</th>
+            <th data-k="level">Decisão</th><th data-k="strategy">Estrutura indicada</th><th class="r" data-k="score">Nota</th><th class="r" data-k="ror">Ganho esp./risco</th><th class="r" data-k="popPhys">Prob. lucro</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </article>
+  </section>
+
   <!-- ================= ANÁLISE ================= -->
   <section class="view" id="view-analysis" hidden>
-    <div class="chips" id="tickers" role="listbox" aria-label="Ativos"></div>
+    <div class="assetbar">
+      <div class="picker">
+        <button class="picker-btn" id="pickerBtn" aria-haspopup="listbox" aria-expanded="false" aria-controls="pickerPanel"><span class="dim">Ativo</span><b id="pickerCur">—</b><span class="caret" aria-hidden="true">▾</span></button>
+        <div class="picker-panel" id="pickerPanel" hidden>
+          <input class="input" id="pickerSearch" placeholder="Buscar ativo, empresa ou setor — ou digite qualquer ticker (ex.: ABCD3, AAPL)" autocomplete="off" spellcheck="false" aria-label="Buscar ativo">
+          <div class="picker-list" id="pickerList" role="listbox" aria-label="Ativos"></div>
+        </div>
+      </div>
+      <div class="recent" id="recent" aria-label="Ativos recentes"></div>
+    </div>
     <div class="grid g-chart">
       <article class="card chart-card">
         <header class="card-h">
@@ -118,7 +155,11 @@
       </header>
       <div id="opEmpty" class="empty">Escolha um ativo acima e clique em <b>Gerar operação</b>. O motor cruza macro, gráfico, volatilidade e gregas, testa compra e venda de calls e puts, travas, diagonais, condor e calendário, passa tudo pela camada anti-erro e só então recomenda — ou manda ficar de fora.</div>
       <div id="opOut" hidden>
-        <div class="decision" id="decision"></div>
+        <div class="verdict" id="verdict"></div>
+        <div class="grid g-2 verdict-why">
+          <div class="box"><h4>Por que esta decisão</h4><ul class="plist" id="notWorth"></ul><ul class="plist soft" id="plain"></ul></div>
+          <div class="box"><h4>O que mudaria a decisão</h4><ul class="plist trig" id="triggers"></ul></div>
+        </div>
         <div class="grid g-3">
           <div class="mini"><h4>Viés direcional</h4><div class="num big" id="dirBias"></div><div class="muted" id="dirLbl"></div><ul class="comps sm" id="dirComps"></ul></div>
           <div class="mini"><h4>Volatilidade</h4><div class="num big" id="volIv"></div><div class="muted" id="volLbl"></div><div class="kpis kpis-2" id="volKpis"></div></div>
@@ -126,11 +167,12 @@
         </div>
 
         <div id="bestWrap">
-          <h3 class="sec">Operação recomendada</h3>
+          <h3 class="sec" id="roleTitle">Operação recomendada</h3>
+          <div class="warnstrip" id="warnStrip" hidden></div>
           <div class="grid g-best">
             <div>
               <div class="best-h"><span class="best-name" id="bestName"></span><span class="score" id="bestScore"></span></div>
-              <table class="tbl legs" id="legs"><thead><tr><th>Perna</th><th>Tipo</th><th class="r">Strike</th><th>Venc.</th><th class="r">Prêmio</th><th class="r">Δ</th><th class="r">Θ/dia</th><th class="r">Vega</th><th class="r">VI</th></tr></thead><tbody></tbody></table>
+              <div class="tbl-scroll"><table class="tbl legs" id="legs"><thead><tr><th>Perna</th><th>Tipo</th><th class="r">Strike</th><th>Venc.</th><th class="r">Prêmio</th><th class="r">Δ</th><th class="r">Θ/dia</th><th class="r">Vega</th><th class="r">VI</th></tr></thead><tbody></tbody></table></div>
               <div class="kpis kpis-4" id="bestKpis"></div>
             </div>
             <div class="payoff-box">
@@ -148,7 +190,7 @@
 
         <div class="grid g-2">
           <div>
-            <h3 class="sec">Por que esta decisão</h3>
+            <h3 class="sec">Análise completa</h3>
             <div id="ai" class="ai" hidden></div>
             <div id="why" class="why"></div>
           </div>

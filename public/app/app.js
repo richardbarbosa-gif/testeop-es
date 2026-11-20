@@ -44,6 +44,7 @@
     if (t === 'analysis' && !chart) initChart();
     if (t === 'analysis' && chart) resizeChart();
     if (t === 'journal') loadJournal();
+    if (t === 'scanner') loadScanner();
   }
   $('logout').addEventListener('click', function () { api('/api/logout', { method: 'POST' }).finally(function () { location.replace('/login'); }); });
 
@@ -62,6 +63,7 @@
     $('needle').style.transform = 'rotate(' + (r.score * 0.9) + 'deg)';
     $('regQuorum').textContent = 'cobertura ' + r.quorum + '%';
     $('regStress').hidden = !r.stress;
+    $('regCore').textContent = 'Leitura descritiva do humor do mercado hoje. O efeito histórico deste regime em cada ativo (que pode ser o oposto do intuitivo) é calibrado na aba Análise' + (m.core && m.core.score != null ? ' — índice central ' + n(m.core.score, 0) + ' (' + m.core.bucket + ').' : '.');
     var pill = $('regimePill');
     pill.textContent = 'Regime ' + (r.score > 0 ? '+' : '') + r.score + ' · ' + r.label.split(' (')[0];
     pill.className = 'pill regime-pill ' + (r.score >= 10 ? 'pos' : r.score <= -10 ? 'neg' : 'neu');
@@ -170,7 +172,6 @@
   // ---------------- análise ----------------
   var chart, candleS, volS, e8S, e20S, s200S, priceLines = [];
   var selected = store.get('ticker', 'PETR4');
-  var universe = [];
 
   function initChart() {
     if (!window.LightweightCharts) { $('chart').innerHTML = '<div class="empty">Biblioteca de gráficos não carregou.</div>'; return; }
@@ -193,9 +194,63 @@
   }
   function resizeChart() { if (chart) chart.timeScale().fitContent(); }
 
-  function renderChips() {
-    $('tickers').innerHTML = universe.map(function (u) { return '<button class="chip" role="option" data-t="' + esc(u.ticker) + '" aria-selected="' + (u.ticker === selected) + '"><b>' + esc(u.ticker) + '</b><small>' + esc(u.market === 'US' ? 'EUA' : 'B3') + '</small></button>'; }).join('');
-    $('tickers').querySelectorAll('.chip').forEach(function (c) { c.addEventListener('click', function () { selected = c.dataset.t; store.set('ticker', selected); renderChips(); loadAsset(selected); $('opOut').hidden = true; $('opEmpty').hidden = false; }); });
+  // ---------- seletor de ativos (busca + setores + recentes) ----------
+  var groups = [];
+  var recent = store.get('recent', ['PETR4', 'VALE3', 'BOVA11', 'ITUB4', 'EWZ']);
+  function flatUniverse() { var out = []; groups.forEach(function (g) { g.items.forEach(function (i) { out.push({ ticker: i.ticker, name: i.name, market: i.market, group: g.title }); }); }); return out; }
+  function norm(x) { return String(x || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, ''); }
+  function renderPicker(q) {
+    var query = norm(q).trim();
+    var html = '';
+    groups.forEach(function (g) {
+      var items = g.items.filter(function (i) { return !query || norm(i.ticker).indexOf(query) >= 0 || norm(i.name).indexOf(query) >= 0 || norm(g.title).indexOf(query) >= 0; });
+      if (!items.length) return;
+      html += '<div class="pg"><h5>' + esc(g.title) + '</h5><div class="pg-items">' + items.map(function (i) {
+        return '<button class="pi' + (i.ticker === selected ? ' cur' : '') + '" role="option" data-t="' + esc(i.ticker) + '"><b>' + esc(i.ticker) + '</b><small>' + esc(i.name) + '</small></button>';
+      }).join('') + '</div></div>';
+    });
+    var raw = String(q || '').trim().toUpperCase().replace(/\.SA$/, '');
+    var known = flatUniverse().some(function (i) { return i.ticker === raw; });
+    if (raw && /^[A-Z0-9]{2,8}$/.test(raw) && !known) {
+      var custom = '<div class="pg"><h5>Buscar ticker fora da lista</h5><div class="pg-items"><button class="pi custom" data-t="' + esc(raw) + '" data-custom="1"><b>' + esc(raw) + '</b><small>analisar este ativo</small></button></div></div>';
+      // Código B3 completo (ex.: TAEE11) vem primeiro; texto parcial (ex.: "bova") deixa os resultados da lista na frente.
+      html = /^[A-Z]{4}(3|4|5|6|11|32|33|34|35)$/.test(raw) || !html ? custom + html : html + custom;
+    }
+    $('pickerList').innerHTML = html || '<p class="dim small">Nada encontrado. Digite o código completo (ex.: ABCD3) para buscar.</p>';
+    $('pickerList').querySelectorAll('.pi').forEach(function (b) { b.addEventListener('click', function () { choose(b.dataset.t, b.dataset.custom === '1'); }); });
+  }
+  function openPicker(open) {
+    $('pickerPanel').hidden = !open;
+    $('pickerBtn').setAttribute('aria-expanded', String(open));
+    if (open) { $('pickerSearch').value = ''; renderPicker(''); setTimeout(function () { $('pickerSearch').focus(); }, 0); }
+  }
+  $('pickerBtn').addEventListener('click', function (e) { e.stopPropagation(); openPicker($('pickerPanel').hidden); });
+  $('pickerSearch').addEventListener('input', function () { renderPicker(this.value); });
+  $('pickerSearch').addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') { openPicker(false); $('pickerBtn').focus(); }
+    if (e.key === 'Enter') { var first = $('pickerList').querySelector('.pi'); if (first) first.click(); }
+  });
+  document.addEventListener('click', function (e) { if (!$('pickerPanel').hidden && !e.target.closest('.picker')) openPicker(false); });
+  function choose(t, custom) {
+    openPicker(false);
+    if (custom) {
+      $('pickerCur').textContent = t + '…';
+      api('/api/lookup/' + encodeURIComponent(t)).then(function (r) { selectTicker(r.ticker); }).catch(function (e) { $('pickerCur').textContent = selected; toast(e.message); });
+    } else selectTicker(t);
+  }
+  function renderRecent() {
+    $('recent').innerHTML = recent.slice(0, 8).map(function (t) { return '<button data-t="' + esc(t) + '" aria-current="' + (t === selected) + '">' + esc(t) + '</button>'; }).join('');
+    $('recent').querySelectorAll('button').forEach(function (b) { b.addEventListener('click', function () { selectTicker(b.dataset.t); }); });
+  }
+  function selectTicker(t, thenGenerate) {
+    selected = t; store.set('ticker', t);
+    recent = [t].concat(recent.filter(function (x) { return x !== t; })).slice(0, 8); store.set('recent', recent);
+    $('pickerCur').textContent = t;
+    renderRecent();
+    $('opOut').hidden = true; $('opEmpty').hidden = false;
+    $('opEmpty').innerHTML = 'Clique em <b>Gerar operação</b> para analisar ' + esc(t) + '.';
+    var p = loadAsset(t);
+    if (thenGenerate && p) p.then(function () { if (selected === t) generate(); });
   }
 
   function loadAsset(t) {
@@ -273,44 +328,58 @@
   function renderOp(o) {
     $('opEmpty').hidden = true; $('opOut').hidden = false;
     var cur = o.market === 'US' ? 'US$' : 'R$';
-    var cls = o.decision === 'OPERAR' ? 'go' : o.decision.indexOf('CONFIRMAR') >= 0 ? 'check' : 'stop';
-    $('decision').className = 'decision ' + cls;
-    $('decision').innerHTML = '<span class="lbl">' + esc(o.decision) + '</span>' + (o.reasons.length ? '<ul>' + o.reasons.map(function (r) { return '<li>' + esc(r) + '</li>'; }).join('') + '</ul>' : '<span class="muted">Todas as verificações essenciais passaram.</span>');
+    var d = o.decision;
+    var best = o.best;
+    var badges = ['Viés ' + (o.dir.bias > 0 ? '+' : '') + o.dir.bias + ' (' + o.dir.label + ')', 'Confiança ' + o.dir.confidence + '/100', 'Opções ' + o.vol.label];
+    if (d.needsBookCheck) badges.push('Preços teóricos — confirmar no book');
+    if (o.regime.stress) badges.push('Mercado em estresse');
+    $('verdict').className = 'verdict ' + d.level;
+    $('verdict').innerHTML = '<div class="vh">' + esc(d.headline) + '</div>' + (d.summary ? '<p class="vs">' + esc(d.summary) + '</p>' : '') + '<div class="vb">' + badges.map(function (b) { return '<span>' + esc(b) + '</span>'; }).join('') + '</div>';
+    $('notWorth').innerHTML = (o.notWorth || []).map(function (r) { return '<li>' + esc(r) + '</li>'; }).join('');
+    $('plain').innerHTML = (o.plain || []).map(function (r) { return '<li>' + esc(r) + '</li>'; }).join('');
+    $('triggers').innerHTML = (o.triggers || []).map(function (t) { return '<li>' + esc(t.text) + '</li>'; }).join('') || '<li class="dim">Sem gatilhos relevantes no momento.</li>';
 
     $('dirBias').textContent = (o.dir.bias > 0 ? '+' : '') + o.dir.bias; $('dirBias').className = 'num big ' + sgn(o.dir.bias);
-    $('dirLbl').textContent = o.dir.label + ' · confiança ' + o.dir.confidence + '/100 · concordância ' + o.dir.agreement + '%';
+    $('dirLbl').textContent = o.dir.label + ' · confiança ' + o.dir.confidence + '/100';
     $('dirComps').innerHTML = o.dir.comps.map(function (c) {
       var w = Math.min(50, Math.abs(c.score) / 2);
       var st = c.score >= 0 ? 'left:50%;width:' + w + '%;background:' + C_UP : 'right:50%;width:' + w + '%;background:' + C_DN;
       return '<li><span class="lbl" title="' + esc(c.label) + '">' + esc(c.label) + '</span><span class="bar"><i style="' + st + '"></i></span><span class="v num ' + sgn(c.score) + '">' + Math.round(c.score) + '</span></li>';
     }).join('');
     $('volIv').textContent = 'VI ' + n(o.vol.atmIv * 100, 1) + '%';
-    $('volLbl').textContent = 'Volatilidade ' + o.vol.label + (o.vol.theoretical ? ' (VI estimada)' : '');
-    $('volKpis').innerHTML = kpi('Vol. prevista (EWMA)', n(o.vol.ewma * 100, 1) + '%', 'VH 20d ' + n(o.vol.hv20 * 100, 1) + '%') + kpi('VI / EWMA', o.vol.ratio ? n(o.vol.ratio, 2) + 'x' : '—') + kpi('Percentil VH', n(o.vol.hvPct, 0)) + kpi('IV Rank', o.vol.ivRank != null ? n(o.vol.ivRank, 0) : 'em formação');
+    $('volLbl').textContent = o.vol.ivReal ? 'Opções ' + o.vol.label + ' frente à vol. prevista' : 'VI estimada (sem grade real)';
+    $('volKpis').innerHTML = kpi('Vol. prevista', n(o.vol.forecast * 100, 1) + '%', 'EWMA ' + n(o.vol.ewma * 100, 1) + '% · 1 ano ' + n(o.vol.hv252 * 100, 1) + '%') + kpi('VI / prevista', o.vol.ratio ? n(o.vol.ratio, 2) + 'x' : '—') + kpi('Vol. hist. 20d', n(o.vol.hv20 * 100, 1) + '%', 'percentil ' + n(o.vol.hvPct, 0)) + kpi('IV Rank', o.vol.ivRank != null ? n(o.vol.ivRank, 0) : 'em formação');
     $('chainSrc').innerHTML = '<div class="tag ' + (o.chain.real ? 'up' : '') + '">' + esc(o.chain.source) + '</div><p class="muted small" style="margin:8px 0 0">' + (o.chain.real ? 'Grade real com bid/ask, volume e contratos em aberto.' : 'Sem grade real conectada: strikes e prêmios são <b>teóricos</b> (' + esc(o.chain.volMethod || '') + '). Use como mapa e confirme no book.') + '</p>' + (o.chain.providerErrors.length ? '<p class="small down">' + esc(o.chain.providerErrors.join(' · ')) + '</p>' : '') + '<p class="dim small" style="margin:6px 0 0">Juros ' + n(o.inputs.r * 100) + '% · dividend yield ' + n(o.inputs.q * 100, 1) + '%</p>';
 
-    var best = o.best;
     $('bestWrap').hidden = !best;
     if (best) {
+      $('roleTitle').textContent = d.role || 'Operação';
+      var ws = $('warnStrip');
+      if (d.level === 'nao_vale') { ws.hidden = false; ws.textContent = 'O sistema não vê vantagem estatística agora. Esta é a estrutura de menor dano esperado entre as aprovadas na camada anti-erro, com risco definido e tamanho reduzido a 1/3. Opere apenas se tiver um motivo próprio.'; }
+      else if (d.level === 'reduzido') { ws.hidden = false; ws.textContent = 'Vantagem existe, mas com ressalvas (veja "Por que esta decisão"): o tamanho sugerido já está pela metade.'; }
+      else ws.hidden = true;
       $('bestName').textContent = best.name;
       $('bestScore').textContent = 'nota ' + best.score + '/100';
       $('legs').querySelector('tbody').innerHTML = best.legs.map(function (l) {
         var ser = l.theoretical ? (l.seriesHint ? '<br><span class="dim small">' + esc(l.seriesHint) + ' (confirmar)</span>' : '') : '<br><span class="dim small">' + esc(l.symbol) + '</span>';
         return '<tr><td class="' + (l.side > 0 ? 'buy' : 'sell') + '">' + (l.side > 0 ? 'COMPRA' : 'VENDA') + '</td><td>' + l.type.toUpperCase() + ser + '</td><td class="r num">' + n(l.strike) + '</td><td class="num">' + esc(l.expiry.split('-').reverse().join('/')) + ' <span class="dim">(' + l.dte + 'd)</span></td><td class="r num">' + n(l.mid) + '</td><td class="r num">' + n(l.delta) + '</td><td class="r num">' + n(l.theta, 3) + '</td><td class="r num">' + n(l.vega, 3) + '</td><td class="r num">' + n(l.iv * 100, 1) + '%</td></tr>';
       }).join('');
-      var L = best.lot;
+      var L = best.lot * (best.fx || 1);
+      var maxP = best.unlimitedGain ? 'ilimitado' : money(best.maxProfit * L, 'R$');
+      var maxL = best.unlimitedLoss ? '−ilimitado' : money(best.maxLoss * L, 'R$');
       $('bestKpis').innerHTML =
-        kpi(best.debit ? 'Débito líquido' : 'Crédito líquido', n(Math.abs(best.cost)), money(Math.abs(best.cost) * L, cur) + ' por lote') +
-        kpi('Ganho máximo', money(best.maxProfit === Infinity ? Infinity : best.maxProfit * L, cur), 'por lote', 'up') +
-        kpi('Perda máxima', money(best.maxLoss === -Infinity ? -Infinity : best.maxLoss * L, cur), 'por lote', 'down') +
+        kpi(best.debit ? 'Débito líquido' : 'Crédito líquido', n(Math.abs(best.cost)), money(Math.abs(best.cost) * L, 'R$') + ' por lote') +
+        kpi('Ganho esperado', money(best.evPhys * L, 'R$'), (best.ror != null ? pct(best.ror * 100, 1) : '—') + ' do risco · por lote', best.evPhys >= 0 ? 'up' : 'down') +
+        kpi('Ganho máximo', maxP, 'por lote', 'up') +
+        kpi('Perda máxima', maxL, 'por lote', 'down') +
+        kpi('Prob. de lucro', n(best.popPhys * 100, 0) + '%', 'cenário calibrado · mercado ' + n(best.pop * 100, 0) + '%') +
         kpi('Ponto(s) de equilíbrio', best.breakevens.map(function (x) { return n(x); }).join(' · ') || '—', 'spot ' + n(o.S)) +
-        kpi('Prob. de lucro', n(best.pop * 100, 0) + '%', 'mercado · sistema ' + n(best.popSys * 100, 0) + '%') +
-        kpi('Retorno / risco', best.rr ? n(best.rr, 2) + 'x' : '—', 'mov. esperado ±' + n(best.expMove)) +
-        kpi('Delta da posição', n(best.greeks.delta), 'Θ ' + n(best.greeks.theta, 3) + '/dia · Vega ' + n(best.greeks.vega, 3) + ' · Γ ' + n(best.greeks.gamma, 4)) +
-        kpi('Tamanho sugerido', best.lots + ' lote(s)', 'risco ≈ R$ ' + n(best.lots * best.riskPerLot, 0));
+        kpi('Delta da posição', n(best.greeks.delta), 'Θ ' + n(best.greeks.theta, 3) + '/dia · Vega ' + n(best.greeks.vega, 3)) +
+        kpi('Tamanho sugerido', best.lots + ' lote(s)', (best.sizeFactor < 1 ? 'reduzido de ' + best.lotsFull + ' · ' : '') + 'risco ≈ R$ ' + n(best.lots * best.riskPerLot, 0));
       drawPayoff(best, o.S, cur);
-      $('exec').innerHTML = o.execution.map(function (s) { return '<li>' + esc(s) + '</li>'; }).join('');
+      $('exec').innerHTML = o.execution.map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('');
       $('exec').hidden = true; $('execBtn').textContent = 'Como executar esta estratégia';
+      $('saveBtn').textContent = d.level === 'nao_vale' ? 'Registrar no diário (contra a recomendação)' : 'Registrar no diário';
       $('saveMsg').textContent = '';
     }
 
@@ -318,20 +387,20 @@
     $('why').innerHTML = o.rationale.map(function (p) { return '<section><h5>' + esc(p.h) + '</h5><p>' + esc(p.t) + '</p></section>'; }).join('');
 
     var checks = o.contextChecks.concat(best ? best.guard.checks : []);
-    var groups = {};
-    checks.forEach(function (c) { (groups[c.group] = groups[c.group] || []).push(c); });
+    var grp = {};
+    checks.forEach(function (c) { (grp[c.group] = grp[c.group] || []).push(c); });
     var order = ['Dados', 'Cálculo', 'Mercado', 'Risco', 'Gestão'];
     var ic = { ok: '✓', warn: '!', block: '✕' };
     var tot = { ok: 0, warn: 0, block: 0 }; checks.forEach(function (c) { tot[c.status]++; });
     $('checks').innerHTML = '<div class="kpis kpis-3" style="margin:0">' + kpi('Aprovadas', tot.ok, '', 'up') + kpi('Alertas', tot.warn, '') + kpi('Bloqueios', tot.block, '', tot.block ? 'down' : '') + '</div>' +
-      order.filter(function (g) { return groups[g]; }).map(function (g) {
-        return '<div class="chk-g"><h5>' + esc(g) + '</h5>' + groups[g].sort(function (a, b) { var r = { block: 0, warn: 1, ok: 2 }; return r[a.status] - r[b.status]; }).map(function (c) { return '<div class="chk ' + c.status + '"><span class="ic">' + ic[c.status] + '</span><div><b>' + esc(c.label) + '</b><span>' + esc(c.detail) + '</span></div></div>'; }).join('') + '</div>';
+      order.filter(function (g) { return grp[g]; }).map(function (g) {
+        return '<div class="chk-g"><h5>' + esc(g) + '</h5>' + grp[g].sort(function (a, b) { var r = { block: 0, warn: 1, ok: 2 }; return r[a.status] - r[b.status]; }).map(function (c) { return '<div class="chk ' + c.status + '"><span class="ic">' + ic[c.status] + '</span><div><b>' + esc(c.label) + '</b><span>' + esc(c.detail) + '</span></div></div>'; }).join('') + '</div>';
       }).join('');
 
     var alts = (o.alternatives || []).map(function (a) { return { a: a, blk: false }; }).concat((o.rejected || []).map(function (a) { return { a: a, blk: true }; }));
     $('alts').innerHTML = alts.map(function (x) {
-      var a = x.a;
-      var info = x.blk ? '<span class="down">Bloqueada:</span> ' + esc(a.guard.blocks.join(' · ')) : 'Prob. lucro ' + n(a.pop * 100, 0) + '% · ganho máx. ' + money(a.maxProfit === Infinity ? Infinity : a.maxProfit * a.lot, cur) + ' · perda máx. ' + money(a.maxLoss === -Infinity ? -Infinity : a.maxLoss * a.lot, cur);
+      var a = x.a, LL = a.lot * (a.fx || 1);
+      var info = x.blk ? '<span class="down">Bloqueada:</span> ' + esc(a.guard.blocks.join(' · ')) : 'Ganho esperado ' + money(a.evPhys * LL, 'R$') + ' (' + (a.ror != null ? pct(a.ror * 100, 1) : '—') + ' do risco) · prob. lucro ' + n(a.popPhys * 100, 0) + '% · perda máx. ' + (a.unlimitedLoss ? 'ilimitada' : money(a.maxLoss * LL, 'R$'));
       return '<div class="alt ' + (x.blk ? 'blk' : '') + '"><h6><span>' + esc(a.name) + '</span><span class="num dim">' + a.score + '</span></h6><p>' + info + '</p></div>';
     }).join('') || '<div class="dim">Nenhuma outra estrutura gerada.</div>';
   }
@@ -345,7 +414,7 @@
   $('saveBtn').addEventListener('click', function () {
     if (!lastOp || !lastOp.best) return;
     var b = lastOp.best;
-    api('/api/journal', { method: 'POST', body: { ticker: lastOp.ticker, name: b.name, decision: lastOp.decision, score: b.score, spot: lastOp.S, lots: b.lots, legs: b.legs, r: lastOp.inputs.r, q: lastOp.inputs.q } })
+    api('/api/journal', { method: 'POST', body: { ticker: lastOp.ticker, name: b.name, decision: lastOp.decision.label, score: b.score, spot: lastOp.S, lots: b.lots, legs: b.legs, r: lastOp.inputs.r, q: lastOp.inputs.q } })
       .then(function () { $('saveMsg').textContent = 'Registrado no diário ✓'; })
       .catch(function (e) { $('saveMsg').textContent = e.message; });
   });
@@ -393,13 +462,74 @@
     }).catch(function (e) { toast(e.message); });
   }
 
+  // ---------------- oportunidades (scanner) ----------------
+  var scanRows = [], scanLevel = store.get('scanLevel', 'todas'), scanSort = { k: null, dir: 1 }, scanTimer = null;
+  var LV = { operar: 'Operar', reduzido: 'Reduzido', nao_vale: 'Não vale a pena', bloqueado: 'Bloqueado' };
+  var LVO = { operar: 0, reduzido: 1, nao_vale: 2, bloqueado: 3 };
+  function loadScanner() {
+    api('/api/scanner').then(function (s) {
+      scanRows = s.rows || [];
+      var prog = s.total ? Math.round(s.done / s.total * 100) : 0;
+      $('scanStatus').innerHTML = s.running ? 'varrendo ' + s.done + '/' + s.total + ' ativos…' : (s.finishedAt ? 'atualizado ' + ago(s.finishedAt) + ' · próxima varredura automática em até 15 min' : 'primeira varredura ainda não concluída');
+      var c = { operar: 0, reduzido: 0, nao_vale: 0, bloqueado: 0 };
+      scanRows.forEach(function (r) { if (!r.error && c[r.level] != null) c[r.level]++; });
+      $('scanKpis').innerHTML = (s.running ? '<div class="progress" style="grid-column:1/-1"><i style="width:' + prog + '%"></i></div>' : '') + kpi('Operar', c.operar, 'vantagem clara', 'up') + kpi('Operar reduzido', c.reduzido, 'vantagem com ressalvas') + kpi('Não vale a pena', c.nao_vale, 'com alternativa indicada') + kpi('Bloqueados', c.bloqueado, 'dados ou risco', c.bloqueado ? 'down' : '');
+      var sel = $('scanGroup'), curG = sel.value;
+      var gs = []; scanRows.forEach(function (r) { if (r.group && gs.indexOf(r.group) < 0) gs.push(r.group); });
+      sel.innerHTML = '<option value="">Todos os setores</option>' + gs.map(function (g) { return '<option' + (g === curG ? ' selected' : '') + '>' + esc(g) + '</option>'; }).join('');
+      renderScan();
+      clearTimeout(scanTimer);
+      if (s.running && current === 'scanner') scanTimer = setTimeout(loadScanner, 4000);
+    }).catch(function (e) { $('scanStatus').textContent = e.message; });
+  }
+  function renderScan() {
+    $('scanLevels').innerHTML = ['todas', 'operar', 'reduzido', 'nao_vale', 'bloqueado'].map(function (k) { return '<button data-k="' + k + '" aria-pressed="' + (k === scanLevel) + '">' + (k === 'todas' ? 'Todas' : LV[k]) + '</button>'; }).join('');
+    $('scanLevels').querySelectorAll('button').forEach(function (b) { b.addEventListener('click', function () { scanLevel = b.dataset.k; store.set('scanLevel', scanLevel); renderScan(); }); });
+    var g = $('scanGroup').value, q = norm($('scanSearch').value);
+    var rows = scanRows.filter(function (r) {
+      if (g && r.group !== g) return false;
+      if (q && norm(r.ticker + ' ' + r.name).indexOf(q) < 0) return false;
+      if (scanLevel !== 'todas' && (r.error ? 'bloqueado' : r.level) !== scanLevel) return false;
+      return true;
+    });
+    if (scanSort.k) rows = rows.slice().sort(function (a, b) {
+      var k = scanSort.k, va = k === 'level' ? LVO[a.level] : a[k], vb = k === 'level' ? LVO[b.level] : b[k];
+      if (va == null) return 1; if (vb == null) return -1;
+      return (va > vb ? 1 : va < vb ? -1 : 0) * scanSort.dir;
+    });
+    var badgeAudit = function (st, kind) {
+      var map = kind === 'tech' ? { edge: ['funciona', 'ok'], contrary: ['reverte', 'bad'], noedge: ['sem vantagem', 'neu'], neutral: ['lateral', 'neu'], unknown: ['amostra curta', 'neu'] } : { bull: ['favorável', 'ok'], bear: ['desfavorável', 'bad'], noedge: ['neutro', 'neu'], unknown: ['sem dado', 'neu'] };
+      var x = map[st] || ['—', 'neu']; return '<span class="bd ' + x[1] + '">' + x[0] + '</span>';
+    };
+    $('scanTbl').querySelector('tbody').innerHTML = rows.map(function (r) {
+      if (r.error) return '<tr data-t="' + esc(r.ticker) + '"><td><b>' + esc(r.ticker) + '</b><small>' + esc(r.name || '') + '</small></td><td colspan="11"><span class="bd err">erro</span> <span class="dim small">' + esc(r.error) + '</span></td></tr>';
+      return '<tr data-t="' + esc(r.ticker) + '">' +
+        '<td><b>' + esc(r.ticker) + '</b><small>' + esc(r.name) + ' · ' + esc(r.group) + '</small></td>' +
+        '<td class="r num">' + n(r.price) + '<small class="' + sgn(r.chg) + '">' + pct(r.chg) + '</small></td>' +
+        '<td><span class="num ' + sgn(r.techScore) + '">' + (r.techScore > 0 ? '+' : '') + n(r.techScore, 0) + '</span> ' + badgeAudit(r.techStatus, 'tech') + '</td>' +
+        '<td>' + badgeAudit(r.macroStatus, 'macro') + '</td>' +
+        '<td class="small">' + esc(r.volLabel) + (r.ivRatio && r.volLabel !== 'estimada' ? ' <span class="dim">' + n(r.ivRatio, 2) + 'x</span>' : '') + '</td>' +
+        '<td class="r num"><span class="' + sgn(r.bias) + '">' + (r.bias > 0 ? '+' : '') + r.bias + '</span> <span class="dim">· ' + r.confidence + '</span></td>' +
+        '<td><span class="bd ' + r.level + '">' + esc(LV[r.level] || r.level) + '</span></td>' +
+        '<td class="small">' + esc(r.strategy || '—') + '</td>' +
+        '<td class="r num">' + (r.score != null ? r.score : '—') + '</td>' +
+        '<td class="r num ' + sgn(r.ror) + '">' + (r.ror != null ? pct(r.ror * 100, 1) : '—') + '</td>' +
+        '<td class="r num">' + (r.popPhys != null ? n(r.popPhys * 100, 0) + '%' : '—') + '</td></tr>';
+    }).join('') || '<tr><td colspan="11" class="dim">' + (scanRows.length ? 'Nenhum ativo neste filtro.' : 'A primeira varredura começa alguns segundos após o servidor iniciar e leva 1–2 minutos.') + '</td></tr>';
+    $('scanTbl').querySelectorAll('tbody tr[data-t]').forEach(function (tr) { tr.addEventListener('click', function () { showTab('analysis'); selectTicker(tr.dataset.t, true); }); });
+  }
+  $('scanTbl').querySelectorAll('th[data-k]').forEach(function (th) { th.addEventListener('click', function () { var k = th.dataset.k; scanSort = { k: k, dir: scanSort.k === k ? -scanSort.dir : (['ticker', 'group', 'level', 'strategy', 'volLabel', 'macroStatus'].indexOf(k) >= 0 ? 1 : -1) }; renderScan(); }); });
+  $('scanGroup').addEventListener('change', renderScan);
+  $('scanSearch').addEventListener('input', renderScan);
+  $('scanRefresh').addEventListener('click', function () { api('/api/scanner/refresh', { method: 'POST' }).then(function () { toast('Varredura iniciada.'); setTimeout(loadScanner, 800); }); });
+
   // ---------------- início ----------------
   api('/api/universe').then(function (u) {
-    universe = u.tickers;
-    if (!universe.some(function (x) { return x.ticker === selected; })) selected = universe[0].ticker;
+    groups = u.groups;
     $('capital').value = store.get('capital', String(u.risk.capital));
     $('risk').value = store.get('risk', String(u.risk.maxRiskPct));
-    renderChips();
+    $('pickerCur').textContent = selected;
+    renderRecent();
     showTab(store.get('tab', 'overview'));
   });
   loadMacro(); loadFlow();

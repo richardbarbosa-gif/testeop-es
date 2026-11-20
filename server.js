@@ -84,13 +84,16 @@ const wrap = (fn) => async (req, res) => {
 };
 const tickerOf = (req) => {
   const t = String(req.params.ticker || '').toUpperCase();
-  if (!TICKER.test(t) || !market.UNDERLYINGS[t]) throw Object.assign(new Error('Ativo inválido.'), { status: 400 });
+  if (!TICKER.test(t) || !market.resolve(t)) throw Object.assign(new Error('Ticker inválido. Use o código da B3 (ex.: PETR4) ou dos EUA (ex.: EWZ).'), { status: 400 });
   return t;
 };
 
-app.get('/api/universe', wrap(async () => ({ tickers: Object.entries(market.UNDERLYINGS).map(([k, v]) => ({ ticker: k, name: v.name, market: v.market })), risk: config.risk, providers: { oplab: Boolean(config.providers.oplabToken), tradier: Boolean(config.providers.tradierToken), ai: Boolean(config.providers.anthropicKey) } })));
+app.get('/api/universe', wrap(async () => ({ groups: market.GROUPS.map((g) => ({ id: g.id, title: g.title, items: g.items.map(([t, name]) => ({ ticker: t, name, market: market.UNDERLYINGS[t].market })) })), risk: config.risk, providers: { oplab: Boolean(config.providers.oplabToken), tradier: Boolean(config.providers.tradierToken), ai: Boolean(config.providers.anthropicKey) } })));
 app.get('/api/macro', wrap(() => market.macro()));
 app.get('/api/asset/:ticker', wrap((req) => market.asset(tickerOf(req))));
+app.get('/api/lookup/:ticker', wrap((req) => market.lookup(tickerOf(req))));
+app.get('/api/scanner', wrap(async () => market.scanState()));
+app.post('/api/scanner/refresh', wrap(async () => { market.runScan().catch(() => {}); return { ok: true }; }));
 app.get('/api/operation/:ticker', wrap((req) => market.operation(tickerOf(req), { capital: req.query.capital, riskPct: req.query.risk })));
 app.get('/api/flow', wrap(() => market.flowRadar()));
 app.get('/api/journal', wrap(() => market.journalView()));
@@ -98,7 +101,8 @@ app.get('/api/journal', wrap(() => market.journalView()));
 app.post('/api/journal', wrap(async (req) => {
   const b = req.body || {};
   const t = String(b.ticker || '').toUpperCase();
-  if (!market.UNDERLYINGS[t]) throw Object.assign(new Error('Ativo inválido.'), { status: 400 });
+  const ru = market.resolve(t);
+  if (!ru) throw Object.assign(new Error('Ativo inválido.'), { status: 400 });
   if (!Array.isArray(b.legs) || !b.legs.length || b.legs.length > 4) throw Object.assign(new Error('Pernas inválidas.'), { status: 400 });
   const legs = b.legs.map((l) => {
     const leg = {
@@ -122,7 +126,7 @@ app.post('/api/journal', wrap(async (req) => {
     cost: legs.reduce((a, l) => a + l.side * l.mid, 0),
     lots: Math.max(1, Math.min(1000, Math.floor(Number(b.lots) || 1))),
     lot: 100,
-    currency: market.UNDERLYINGS[t].market === 'US' ? 'US$' : 'R$',
+    currency: ru.market === 'US' ? 'US$' : 'R$',
     legs,
     note: String(b.note || '').slice(0, 500),
     r: Number(b.r) >= 0 && Number(b.r) < 1 ? Number(b.r) : null,
@@ -140,4 +144,7 @@ app.delete('/api/journal/:id', wrap(async (req) => ({ ok: market.journal.remove(
 
 app.use((_req, res) => res.status(404).json({ ok: false, error: 'Não encontrado.' }));
 
-app.listen(config.port, () => console.log(`Radar de Opções em http://localhost:${config.port}`));
+app.listen(config.port, () => {
+  console.log(`Radar de Opções em http://localhost:${config.port}`);
+  if (process.env.SCANNER !== 'off') market.startScanner(); // varre todos os ativos em segundo plano (15 em 15 min)
+});
