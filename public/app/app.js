@@ -200,6 +200,7 @@
   function flatUniverse() { var out = []; groups.forEach(function (g) { g.items.forEach(function (i) { out.push({ ticker: i.ticker, name: i.name, market: i.market, group: g.title }); }); }); return out; }
   function norm(x) { return String(x || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, ''); }
   function renderPicker(q) {
+    if (!groups.length) { $('pickerList').innerHTML = '<p class="dim small">Carregando lista de ativos…</p>'; return; }
     var query = norm(q).trim();
     var html = '';
     groups.forEach(function (g) {
@@ -526,6 +527,7 @@
   // ---------------- início ----------------
   api('/api/universe').then(function (u) {
     groups = u.groups;
+    if (!$('pickerPanel').hidden) renderPicker($('pickerSearch').value);
     $('capital').value = store.get('capital', String(u.risk.capital));
     $('risk').value = store.get('risk', String(u.risk.maxRiskPct));
     $('pickerCur').textContent = selected;

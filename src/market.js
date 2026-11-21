@@ -329,7 +329,7 @@ async function runScan() {
       scan.partial.push({ ticker: t, name: UNDERLYINGS[t].name, group: UNDERLYINGS[t].groupTitle, error: e.message });
     }
     scan.done++;
-    await new Promise((r) => setTimeout(r, 30)); // cede a vez às requisições do usuário
+    await new Promise((r) => setTimeout(r, 120)); // cede a vez às requisições do usuário
   }
   const sortRows = (rows) => rows.sort((x, y) => (x.error ? 9 : LEVEL_ORDER[x.level]) - (y.error ? 9 : LEVEL_ORDER[y.level]) || (y.score || 0) - (x.score || 0));
   scan.rows = sortRows(scan.partial.slice());
@@ -344,7 +344,7 @@ function scanState() {
 
 function startScanner() {
   const tick = () => runScan().catch((e) => { scan.running = false; console.error('[scanner]', e.message); });
-  setTimeout(tick, 8000).unref();
+  setTimeout(tick, 45000).unref(); // deixa o servidor responder ao usuário primeiro após um reinício
   setInterval(tick, 15 * 60e3).unref();
 }
 
